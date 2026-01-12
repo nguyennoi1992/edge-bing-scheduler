@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Bing Search Scheduler</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    label { display: block; margin-top: 10px; font-weight: bold; }
+    input, textarea { width: 100%; margin-top: 5px; }
+    button { margin-top: 15px; padding: 8px 12px; }
+    .row { display: flex; gap: 10px; }
+    .row input { flex: 1; }
+  </style>
+</head>
+<body>
+  <h2>Bing Search Scheduler</h2>
+
+  <form id="optionsForm" autocomplete="off">
+    <label for="enabled">
+      <input id="enabled" type="checkbox" /> Enable scheduler
+    </label>
+
+    <label for="time">Run time (HH:MM)</label>
+    <input id="time" type="time" value="06:30" />
+
+    <label for="count">Number of searches per run</label>
+    <input id="count" type="number" min="1" max="100" value="10" />
+
+    <label>Interval between tabs (seconds)</label>
+    <div class="row">
+      <input id="intervalMin" type="number" min="0" max="600" placeholder="Min" value="2" />
+      <input id="intervalMax" type="number" min="1" max="600" placeholder="Max" value="5" />
+    </div>
+
+    <label for="custom">Custom queries (newline or comma separated)</label>
+    <textarea id="custom" rows="5" placeholder="Enter custom queries..."></textarea>
+
+    <button id="save" type="submit">Save Settings</button>
+  </form>
+
+  <p id="status"></p>
+
+  <script src="options.js"></script>
+</body>
+</html>
