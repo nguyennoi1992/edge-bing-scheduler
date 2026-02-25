@@ -77,7 +77,7 @@ function getQueryList(cfg) {
 // ---------------- Bing Rewards auto click ----------------
 async function autoClickRewards() {
     console.log("⚡ Auto-clicking Bing Rewards cards...");
-    const tab = await chrome.tabs.create({ url: "https://rewards.bing.com", active: false });
+    const tab = await chrome.tabs.create({ url: "https://rewards.bing.com/earn", active: false });
 
     await waitForTabComplete(tab.id);
 
@@ -122,21 +122,22 @@ async function autoClickRewards() {
                     return unique;
                 }
 
-                function collectDailySetCards() {
-                    const dailySet = document.querySelector("#dailyset");
-                    if (!dailySet) return [];
+                function collectSectionCardsById(sectionId) {
+                    const section = document.querySelector(`#${sectionId}`);
+                    if (!section) return [];
 
-                    const cards = Array.from(dailySet.querySelectorAll("a[href]")).filter((a) => {
+                    const cards = Array.from(section.querySelectorAll("a[href]")).filter((a) => {
                         const href = a.getAttribute("href") || "";
                         const looksLikeTask =
                             href.includes("bing.com/search") ||
+                            href.includes("bing.com/spotlight") ||
                             href.includes("rnoreward=1") ||
-                            href.includes("quizform=dsetqu");
-                        const cardShape =
-                            !!a.querySelector("img") ||
-                            !!a.querySelector("p") ||
-                            a.classList.contains("group");
-                        return looksLikeTask && cardShape;
+                            href.includes("quizform=dsetqu") ||
+                            href.includes("PROGRAMNAME=");
+
+                        // Keep earning / Daily set cards are image tile anchors.
+                        const hasCardImage = !!a.querySelector("img");
+                        return looksLikeTask && hasCardImage;
                     });
 
                     return dedupeAndFilter(cards);
@@ -175,13 +176,20 @@ async function autoClickRewards() {
 
                 function clickGroupsSequentially(groups, delayMs = 3000) {
                     const flat = [];
-                    const dailyCards = collectDailySetCards();
+                    const moreCards = collectSectionCardsById("moreactivities");
+                    if (moreCards.length) {
+                        console.log(`[Rewards] Collected ${moreCards.length} cards under "Keep earning"`);
+                        flat.push(...moreCards);
+                    }
+                    const dailyCards = collectSectionCardsById("dailyset");
                     if (dailyCards.length) {
                         console.log(`[Rewards] Collected ${dailyCards.length} cards under "Daily set"`);
                         flat.push(...dailyCards);
                     }
                     for (const g of groups) {
                         if ((g || "").toLowerCase() === "daily set") continue;
+                        if ((g || "").toLowerCase() === "more activities") continue;
+                        if ((g || "").toLowerCase() === "keep earning") continue;
                         const cards = collectCardsUnderHeading(g);
                         console.log(`[Rewards] Collected ${cards.length} cards under "${g}"`);
                         flat.push(...cards);
@@ -204,7 +212,7 @@ async function autoClickRewards() {
                 }
 
                 setTimeout(() => {
-                    clickGroupsSequentially(["Daily set", "More activities"], 3000);
+                    clickGroupsSequentially(["Keep earning", "Daily set", "More activities"], 3000);
                 }, 2000);
             });
         }
