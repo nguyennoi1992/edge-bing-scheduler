@@ -86,44 +86,34 @@ async function autoClickRewards() {
         world: "MAIN",
         func: () => {
             return new Promise((resolve) => {
-                function collectCardsUnderHeading(headingText) {
-                    const norm = (s) => (s || "").trim().toLowerCase();
-                    const target = norm(headingText);
-                    const h3 = Array.from(document.querySelectorAll("h3"))
-                        .find(h => norm(h.textContent) === target);
-                    if (!h3) return [];
+                const isVisible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+                };
 
-                    let section = h3.closest("section, mee-card-group, mee-daily-set, div, main, body");
-                    let scopeRoot = section || h3.parentElement || document;
-
-                    let scopedCards = Array.from(scopeRoot.querySelectorAll(
-                        "card-content a, card-content button, mee-card a, mee-card button, a.c-card, div[role='button'], a[role='button']"
-                    ));
-
-                    if (scopedCards.length > 50 || scopeRoot === document || scopeRoot === document.body) {
-                        const groupNodes = [];
-                        let n = h3.nextElementSibling;
-                        while (n && n.tagName?.toLowerCase() !== "h3") {
-                            groupNodes.push(n);
-                            n = n.nextElementSibling;
-                        }
-                        scopedCards = groupNodes.flatMap(node =>
-                            Array.from(node.querySelectorAll(
-                                "card-content a, card-content button, mee-card a, mee-card button, a.c-card, div[role='button'], a[role='button']"
-                            ))
-                        );
-                    }
-
-                    const isVisible = (el) => {
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-                    };
+                function dedupeAndFilter(elements) {
                     const unique = [];
                     const seen = new Set();
-                    for (const el of scopedCards) {
-                        if (!isVisible(el)) continue;
-                        const key = el.tagName + "|" + (el.href || "") + "|" + (el.textContent || "").trim();
+                    for (const el of elements) {
+                        if (!el || !isVisible(el)) continue;
+                        const href = el.getAttribute("href") || "";
+                        const labelText = [
+                            el.getAttribute("aria-label"),
+                            el.getAttribute("title"),
+                            el.textContent
+                        ].filter(Boolean).join(" ").toLowerCase();
+
+                        // Avoid non-task controls.
+                        if (href.includes("/earn")) continue;
+                        if (labelText.includes("see more tasks")) continue;
+                        if (labelText.includes("streak protection")) continue;
+
+                        const role = (el.getAttribute("role") || "").toLowerCase();
+                        if (role === "switch") continue;
+                        if (el.matches("input[type='checkbox'], input[type='radio']")) continue;
+
+                        const key = el.tagName + "|" + href + "|" + (el.textContent || "").trim();
                         if (!seen.has(key)) {
                             seen.add(key);
                             unique.push(el);
@@ -132,9 +122,66 @@ async function autoClickRewards() {
                     return unique;
                 }
 
+                function collectDailySetCards() {
+                    const dailySet = document.querySelector("#dailyset");
+                    if (!dailySet) return [];
+
+                    const cards = Array.from(dailySet.querySelectorAll("a[href]")).filter((a) => {
+                        const href = a.getAttribute("href") || "";
+                        const looksLikeTask =
+                            href.includes("bing.com/search") ||
+                            href.includes("rnoreward=1") ||
+                            href.includes("quizform=dsetqu");
+                        const cardShape =
+                            !!a.querySelector("img") ||
+                            !!a.querySelector("p") ||
+                            a.classList.contains("group");
+                        return looksLikeTask && cardShape;
+                    });
+
+                    return dedupeAndFilter(cards);
+                }
+
+                function collectCardsUnderHeading(headingText) {
+                    const norm = (s) => (s || "").trim().toLowerCase();
+                    const target = norm(headingText);
+                    const heading = Array.from(document.querySelectorAll("h1, h2, h3, h4"))
+                        .find((h) => norm(h.textContent) === target);
+                    if (!heading) return [];
+
+                    let section = heading.closest("section, mee-card-group, mee-daily-set, div, main, body");
+                    let scopeRoot = section || heading.parentElement || document;
+
+                    let scopedCards = Array.from(scopeRoot.querySelectorAll(
+                        "a[href], card-content a, card-content button, mee-card a, mee-card button, a.c-card, div[role='button'], a[role='button']"
+                    ));
+
+                    if (scopedCards.length > 50 || scopeRoot === document || scopeRoot === document.body) {
+                        const groupNodes = [];
+                        let n = heading.nextElementSibling;
+                        while (n && !/^h[1-4]$/i.test(n.tagName || "")) {
+                            groupNodes.push(n);
+                            n = n.nextElementSibling;
+                        }
+                        scopedCards = groupNodes.flatMap((node) =>
+                            Array.from(node.querySelectorAll(
+                                "a[href], card-content a, card-content button, mee-card a, mee-card button, a.c-card, div[role='button'], a[role='button']"
+                            ))
+                        );
+                    }
+
+                    return dedupeAndFilter(scopedCards);
+                }
+
                 function clickGroupsSequentially(groups, delayMs = 3000) {
                     const flat = [];
+                    const dailyCards = collectDailySetCards();
+                    if (dailyCards.length) {
+                        console.log(`[Rewards] Collected ${dailyCards.length} cards under "Daily set"`);
+                        flat.push(...dailyCards);
+                    }
                     for (const g of groups) {
+                        if ((g || "").toLowerCase() === "daily set") continue;
                         const cards = collectCardsUnderHeading(g);
                         console.log(`[Rewards] Collected ${cards.length} cards under "${g}"`);
                         flat.push(...cards);
