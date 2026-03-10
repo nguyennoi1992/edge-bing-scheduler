@@ -7,7 +7,7 @@ const REWARDS_SETTLE_MS = 8000;
 
 const DEFAULTS = {
   enabled: true,
-  time: "06:30", // 24h HH:MM
+  time: "08:00", // 24h HH:MM
   searchesPerRun: 50, // how many queries to open per run
   intervalMin: 10, // min seconds between tabs
   intervalMax: 120, // max seconds between tabs
@@ -22,6 +22,7 @@ async function getConfig() {
 
 let runTicker = null;
 let singletonTabId = null;
+let runPromise = null;
 
 // ---------------- Badge helpers ----------------
 async function updateBadge() {
@@ -64,7 +65,7 @@ function randomDelay(min, max) {
 }
 
 function computeNextRunDate(timeHHMM) {
-  const [hour, minute] = (timeHHMM || "06:30").split(":").map(Number);
+  const [hour, minute] = (timeHHMM || "08:00").split(":").map(Number);
   const now = new Date();
   const next = new Date();
   next.setHours(hour || 0, minute || 0, 0, 0);
@@ -83,6 +84,7 @@ function getQueryList(cfg) {
 // ---------------- Bing Rewards auto click ----------------
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
+  const rewardSectionIds = ["moreactivities", "dailyset", "exploreonbing"];
   const rewardUrls = [
     "https://rewards.bing.com/earn",
     "https://rewards.bing.com/dashboard",
@@ -169,27 +171,13 @@ async function autoClickRewards() {
     }
   }
 
-  for (const url of rewardUrls) {
-    console.log(`[Rewards] Processing ${url}`);
-    const tabsBefore = await chrome.tabs.query({});
-    const baselineTabIds = new Set(
-      tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)),
-    );
-    const tab = await chrome.tabs.create({ url, active: false });
-    const spawnedTabIds = new Set();
-    const onCreated = (createdTab) => {
-      if (Number.isInteger(createdTab.id)) {
-        spawnedTabIds.add(createdTab.id);
-      }
-    };
-    chrome.tabs.onCreated.addListener(onCreated);
-    try {
-      await waitForTabComplete(tab.id);
-
-      const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+  async function getRewardCards(tabId) {
+    const [{ result: rewardCards = [] }] =
+      await chrome.scripting.executeScript({
+        target: { tabId },
         world: "MAIN",
-        func: () => {
+        args: [rewardSectionIds],
+        func: (sectionIds) => {
           return new Promise((resolve) => {
             const isVisible = (el) => {
               const rect = el.getBoundingClientRect();
@@ -214,10 +202,7 @@ async function autoClickRewards() {
               }
             }
 
-            function collectSectionCardsById(
-              sectionId,
-              { skipCompleted = true } = {},
-            ) {
+            function collectSectionCardsById(sectionId) {
               const section = document.querySelector(`#${sectionId}`);
               if (!section) return [];
               expandSectionIfCollapsed(section);
@@ -229,13 +214,18 @@ async function autoClickRewards() {
               for (const a of anchors) {
                 if (!a || !isVisible(a)) continue;
                 if (!a.querySelector("img")) continue;
+                if (
+                  a.getAttribute("aria-disabled") === "true" ||
+                  a.closest("[aria-disabled='true'], [data-disabled='true']")
+                ) {
+                  continue;
+                }
 
                 const href = a.getAttribute("href") || "";
                 if (!href || href === "/earn") continue;
 
                 const text = (a.innerText || a.textContent || "").toLowerCase();
                 if (text.includes("see more tasks")) continue;
-                if (skipCompleted && /\bcompleted\b/.test(text)) continue;
 
                 const key = `${href}|${text.replace(/\s+/g, " ").trim()}`;
                 if (seen.has(key)) continue;
@@ -246,47 +236,31 @@ async function autoClickRewards() {
               return unique;
             }
 
-            function clickCardsSequentially(cards, delayMs = 3000) {
-              let idx = 0;
-              function clickNext() {
-                if (idx >= cards.length) {
-                  console.log("✅ Rewards section processed.");
-                  resolve("done");
-                  return;
-                }
-                const card = cards[idx];
-                try {
-                  card.scrollIntoView({ behavior: "smooth", block: "center" });
-                } catch {}
-                console.log("👉 Clicking card", idx + 1, "from target section");
-                card.click();
-                idx++;
-                setTimeout(clickNext, delayMs);
-              }
-              clickNext();
+            function buildCardKey(card) {
+              const href = card?.href || card?.getAttribute?.("href") || "";
+              const titleEl =
+                card.querySelector("p.text-body1Strong") ||
+                card.querySelector("img[alt]");
+              const rawTitle =
+                titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
+              const title = rawTitle.replace(/\s+/g, " ").trim().toLowerCase();
+              return `${href}|${title}`;
             }
 
-            function collectCardsForCurrentPage() {
-              const path = (location.pathname || "").toLowerCase();
-              if (path.startsWith("/earn")) {
-                const cards = collectSectionCardsById("moreactivities", {
-                  skipCompleted: true,
-                });
-                console.log(
-                  `[Rewards] /earn => Keep earning cards: ${cards.length}`,
-                );
-                return cards;
+            function collectCards(cards) {
+              const items = [];
+              const seen = new Set();
+
+              for (const card of cards) {
+                const href = card?.href || card?.getAttribute?.("href") || "";
+                if (!href) continue;
+                const key = buildCardKey(card);
+                if (seen.has(key)) continue;
+                seen.add(key);
+                items.push({ key, href });
               }
-              if (path.startsWith("/dashboard")) {
-                const cards = collectSectionCardsById("dailyset", {
-                  skipCompleted: true,
-                });
-                console.log(
-                  `[Rewards] /dashboard => Daily set cards: ${cards.length}`,
-                );
-                return cards;
-              }
-              return [];
+
+              return items;
             }
 
             let attempts = 0;
@@ -295,21 +269,176 @@ async function autoClickRewards() {
 
             const timer = setInterval(() => {
               attempts++;
-              const cards = collectCardsForCurrentPage();
+              const sectionCards = (sectionIds || [])
+                .map((sectionId) => collectSectionCardsById(sectionId))
+                .flat();
+              const cards = collectCards(sectionCards);
+
               if (cards.length || attempts >= maxAttempts) {
                 clearInterval(timer);
-                clickCardsSequentially(cards, 3000);
+                console.log(
+                  `[Rewards] Actionable cards found across sections: ${sectionCards.length}`,
+                );
+                resolve(cards);
               }
             }, pollMs);
           });
         },
       });
 
-      console.log(`[Rewards] Auto-click result for ${url}:`, result);
-      await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
-      console.log(
-        `[Rewards] Waited ${REWARDS_SETTLE_MS}ms before closing tabs for ${url}`,
-      );
+    return rewardCards;
+  }
+
+  async function clickRewardCard(tabId, targetKey) {
+    const [{ result: clicked = false }] =
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        args: [targetKey, rewardSectionIds],
+        func: (keyToClick, sectionIds) => {
+          const isVisible = (el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.visibility !== "hidden" &&
+              style.display !== "none"
+            );
+          };
+
+          function expandSectionIfCollapsed(section) {
+            if (!section) return;
+            const trigger = section.querySelector(
+              "button[slot='trigger'][aria-expanded='false']",
+            );
+            if (trigger) {
+              try {
+                trigger.click();
+              } catch {}
+            }
+          }
+
+          function collectSectionCardsById(sectionId) {
+            const section = document.querySelector(`#${sectionId}`);
+            if (!section) return [];
+            expandSectionIfCollapsed(section);
+
+            return Array.from(section.querySelectorAll("a[href]"))
+              .filter((a) => a && isVisible(a) && a.querySelector("img"))
+              .filter((a) => {
+                return !(
+                  a.getAttribute("aria-disabled") === "true" ||
+                  a.closest("[aria-disabled='true'], [data-disabled='true']")
+                );
+              });
+          }
+
+          function buildCardKey(card) {
+            const href = card?.href || card?.getAttribute?.("href") || "";
+            const titleEl =
+              card.querySelector("p.text-body1Strong") ||
+              card.querySelector("img[alt]");
+            const rawTitle =
+              titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
+            const title = rawTitle.replace(/\s+/g, " ").trim().toLowerCase();
+            return `${href}|${title}`;
+          }
+
+          const cards = (sectionIds || [])
+            .map((sectionId) => collectSectionCardsById(sectionId))
+            .flat();
+          const card = cards.find((a) => buildCardKey(a) === keyToClick);
+
+          if (!card) return false;
+
+          try {
+            card.scrollIntoView({ behavior: "smooth", block: "center" });
+          } catch {}
+
+          const clickTarget = card.querySelector("img") || card;
+          for (const type of ["mouseover", "mousedown", "mouseup"]) {
+            try {
+              clickTarget.dispatchEvent(
+                new MouseEvent(type, {
+                  view: window,
+                  bubbles: true,
+                  cancelable: true,
+                }),
+              );
+            } catch {}
+          }
+
+          try {
+            card.click();
+          } catch {}
+
+          return true;
+        },
+      });
+
+    return clicked;
+  }
+
+  for (const url of rewardUrls) {
+    console.log(`[Rewards] Processing ${url}`);
+    const tabsBefore = await chrome.tabs.query({});
+    const baselineTabIds = new Set(
+      tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)),
+    );
+    const tab = await chrome.tabs.create({ url, active: false });
+    const spawnedTabIds = new Set();
+    const onCreated = (createdTab) => {
+      if (Number.isInteger(createdTab.id)) {
+        spawnedTabIds.add(createdTab.id);
+      }
+    };
+    chrome.tabs.onCreated.addListener(onCreated);
+
+    try {
+      await waitForTabComplete(tab.id);
+      await new Promise((r) => setTimeout(r, 2000));
+
+      const attemptedUrls = new Set();
+      const maxCardClicks = 12;
+
+      for (let i = 0; i < maxCardClicks; i++) {
+        const rewardCards = await getRewardCards(tab.id);
+        const nextCard = rewardCards.find(
+          (card) => !attemptedUrls.has(card.key),
+        );
+
+        if (!nextCard) {
+          console.log(`[Rewards] No more actionable cards found for ${url}`);
+          break;
+        }
+
+        attemptedUrls.add(nextCard.key);
+        console.log(
+          `[Rewards] Clicking reward card ${i + 1}: ${nextCard.href} (${nextCard.key})`,
+        );
+
+        await clickRewardCard(tab.id, nextCard.key);
+
+        await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
+
+        const currentTabs = await chrome.tabs.query({});
+        const newTabIds = currentTabs
+          .map((t) => t.id)
+          .filter((id) => Number.isInteger(id))
+          .filter((id) => !baselineTabIds.has(id))
+          .filter((id) => id !== tab.id);
+
+        for (const childTabId of newTabIds) {
+          try {
+            await waitForTabComplete(childTabId, 10000);
+          } catch {}
+        }
+
+        await chrome.tabs.reload(tab.id);
+        await waitForTabComplete(tab.id);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
     } finally {
       chrome.tabs.onCreated.removeListener(onCreated);
       if (tab.id) {
@@ -341,7 +470,6 @@ async function autoClickRewards() {
     }
   }
 }
-
 // ---------------- Bing search logic ----------------
 async function typeInBing(query, perCharDelayMs = 80) {
   function sleep(ms) {
@@ -471,23 +599,22 @@ async function runTask() {
   }
   runTicker = setInterval(updateBadge, 1000);
 
+  let cumulativeDelaySecs = 0;
   queries.forEach((q, idx) => {
-    setTimeout(
-      async () => {
-        openBingAndType(q);
+    cumulativeDelaySecs += perOpenDelays[idx];
+    setTimeout(async () => {
+      await openBingAndType(q);
 
-        if (idx + 1 < perOpenDelays.length) {
-          accumulatedSecs += perOpenDelays[idx + 1];
-          const nextOpenAt = start + accumulatedSecs * 1000;
-          await chrome.storage.sync.set({ nextOpenAt });
-        } else {
-          await chrome.storage.sync.set({ nextOpenAt: null });
-        }
+      if (idx + 1 < perOpenDelays.length) {
+        accumulatedSecs += perOpenDelays[idx + 1];
+        const nextOpenAt = start + accumulatedSecs * 1000;
+        await chrome.storage.sync.set({ nextOpenAt });
+      } else {
+        await chrome.storage.sync.set({ nextOpenAt: null });
+      }
 
-        await updateBadge();
-      },
-      perOpenDelays.slice(0, idx + 1).reduce((a, b) => a + b, 0) * 1000,
-    );
+      await updateBadge();
+    }, cumulativeDelaySecs * 1000);
   });
 
   const totalDelaySecs = perOpenDelays.reduce((a, b) => a + b, 0);
@@ -503,6 +630,25 @@ async function runTask() {
     });
     await updateBadge();
   }, totalDelaySecs * 1000);
+}
+
+async function startRun(source = "unknown") {
+  if (runPromise) {
+    console.log(`[Run] Skip ${source}; a run is already in progress.`);
+    return runPromise;
+  }
+  runPromise = (async () => {
+    try {
+      console.log(`[Run] Started from ${source}`);
+      await runTask();
+    } catch (e) {
+      console.error(`[Run] Failed from ${source}:`, e);
+    } finally {
+      runPromise = null;
+      console.log(`[Run] Finished from ${source}`);
+    }
+  })();
+  return runPromise;
 }
 
 // ---------------- Scheduling ----------------
@@ -523,10 +669,10 @@ async function scheduleAlarm() {
   console.log("Next run scheduled at:", next.toString());
 }
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_NAME) {
-    runTask();
-    scheduleAlarm();
+    await startRun("alarm");
+    await scheduleAlarm();
   }
 });
 
@@ -552,12 +698,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "RESCHEDULE") {
-    scheduleAlarm();
+    scheduleAlarm()
+      .then(() => sendResponse?.({ ok: true }))
+      .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
+    return true;
   }
   if (msg.type === "RUN_NOW") {
-    runTask();
+    startRun("run_now")
+      .then(() => sendResponse?.({ ok: true }))
+      .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
+    return true;
   }
 });
 
@@ -568,3 +720,16 @@ chrome.runtime.onInstalled.addListener(() => {
 
 scheduleAlarm();
 updateBadge();
+
+
+
+
+
+
+
+
+
+
+
+
+
