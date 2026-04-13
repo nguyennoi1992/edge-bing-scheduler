@@ -669,7 +669,7 @@ async function autoClickRewards() {
                 if (!href || href === "/earn") continue;
 
                 const text = (a.innerText || a.textContent || "").toLowerCase();
-                if (text.includes("see more tasks")) continue;
+                if (text.includes("see more tasks") || /\bcompleted\b|\bdone\b/.test(text)) continue;
 
                 const key = `${href}|${text.replace(/\s+/g, " ").trim()}`;
                 if (seen.has(key)) continue;
@@ -739,7 +739,10 @@ async function autoClickRewards() {
         target: { tabId },
         world: "MAIN",
         args: [targetKey, rewardSectionIds],
-        func: (keyToClick, sectionIds) => {
+        func: async (keyToClick, sectionIds) => {
+          const normalizeText = (value) =>
+            (value || "").replace(/\s+/g, " ").trim();
+
           const isVisible = (el) => {
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
@@ -750,6 +753,13 @@ async function autoClickRewards() {
               style.display !== "none"
             );
           };
+
+          const isDisabled = (el) =>
+            !el ||
+            el.getAttribute("aria-disabled") === "true" ||
+            !!el.closest("[aria-disabled='true'], [data-disabled='true']");
+
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
           function expandSectionIfCollapsed(section) {
             if (!section) return;
@@ -775,6 +785,10 @@ async function autoClickRewards() {
                   a.getAttribute("aria-disabled") === "true" ||
                   a.closest("[aria-disabled='true'], [data-disabled='true']")
                 );
+              })
+              .filter((a) => {
+                const text = normalizeText(a.innerText || a.textContent || "").toLowerCase();
+                return !/\bcompleted\b|\bdone\b/.test(text);
               });
           }
 
@@ -789,6 +803,199 @@ async function autoClickRewards() {
             return `${href}|${title}`;
           }
 
+          function getCardStatusText(card) {
+            return normalizeText(card?.innerText || card?.textContent || "").toLowerCase();
+          }
+
+          function getCardSignature(card) {
+            if (!card) return "";
+            const href = card?.getAttribute?.("href") || card?.href || "";
+            const expanded =
+              card.getAttribute("aria-expanded") ||
+              card.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ||
+              "";
+            const disabled = isDisabled(card) ? "disabled" : "enabled";
+            const status = getCardStatusText(card);
+            return `${href}|${expanded}|${disabled}|${status}`;
+          }
+
+          function getClickableTargets(card) {
+            if (!card) return [];
+
+            const candidates = [
+              card.querySelector("[data-react-aria-pressable='true']"),
+              card.querySelector("[role='link']"),
+              card.querySelector("[role='button']"),
+              card.querySelector("button"),
+              card.querySelector("img"),
+              card,
+            ].filter(Boolean);
+
+            const unique = [];
+            const seen = new Set();
+            for (const el of candidates) {
+              if (!(el instanceof HTMLElement)) continue;
+              if (!isVisible(el) || isDisabled(el)) continue;
+              if (seen.has(el)) continue;
+              seen.add(el);
+              unique.push(el);
+            }
+
+            return unique;
+          }
+
+          function centerPoint(el) {
+            const rect = el.getBoundingClientRect();
+            return {
+              clientX: rect.left + Math.max(1, Math.min(rect.width - 1, rect.width / 2)),
+              clientY: rect.top + Math.max(1, Math.min(rect.height - 1, rect.height / 2)),
+            };
+          }
+
+          function dispatchPointerMouseSequence(target) {
+            if (!target) return false;
+
+            const point = centerPoint(target);
+            const common = {
+              view: window,
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              button: 0,
+              buttons: 1,
+              clientX: point.clientX,
+              clientY: point.clientY,
+            };
+
+            const eventPlan = [
+              ["pointerover", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse" }],
+              ["pointerenter", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse" }],
+              ["mouseover", MouseEvent, {}],
+              ["mouseenter", MouseEvent, {}],
+              ["pointermove", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse" }],
+              ["mousemove", MouseEvent, {}],
+              ["pointerdown", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0.5 }],
+              ["mousedown", MouseEvent, {}],
+              ["pointerup", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0 }],
+              ["mouseup", MouseEvent, {}],
+              ["click", MouseEvent, {}],
+            ];
+
+            for (const [type, Ctor, extra] of eventPlan) {
+              try {
+                const EventCtor =
+                  Ctor === PointerEvent && typeof PointerEvent !== "function"
+                    ? MouseEvent
+                    : Ctor;
+                target.dispatchEvent(new EventCtor(type, { ...common, ...extra }));
+              } catch {}
+            }
+
+            return true;
+          }
+
+          function dispatchKeyboardSequence(target, key) {
+            if (!target) return false;
+            const code = key === " " ? "Space" : key;
+
+            try {
+              target.focus({ preventScroll: true });
+            } catch {
+              try {
+                target.focus();
+              } catch {}
+            }
+
+            for (const type of ["keydown", "keypress", "keyup"]) {
+              try {
+                target.dispatchEvent(
+                  new KeyboardEvent(type, {
+                    key,
+                    code,
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                  }),
+                );
+              } catch {}
+            }
+
+            return true;
+          }
+
+          async function tryActivateTarget(card, target) {
+            if (!target || !isVisible(target) || isDisabled(target)) return false;
+
+            const beforeSignature = getCardSignature(card);
+            const beforeHref = card?.href || card?.getAttribute?.("href") || "";
+            const beforeUrl = location.href;
+
+            try {
+              target.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+            } catch {}
+
+            try {
+              target.focus({ preventScroll: true });
+            } catch {
+              try {
+                target.focus();
+              } catch {}
+            }
+
+            try {
+              dispatchPointerMouseSequence(target);
+              await sleep(200);
+              if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
+                return true;
+              }
+            } catch {}
+
+            try {
+              target.click();
+              await sleep(250);
+              if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
+                return true;
+              }
+            } catch {}
+
+            for (const key of ["Enter", " "]) {
+              try {
+                dispatchKeyboardSequence(target, key);
+                await sleep(250);
+                if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
+                  return true;
+                }
+              } catch {}
+            }
+
+            const point = centerPoint(target);
+            const topEl = document.elementFromPoint(point.clientX, point.clientY);
+            if (
+              topEl &&
+              topEl instanceof HTMLElement &&
+              topEl !== target &&
+              (card.contains(topEl) || topEl.contains(card))
+            ) {
+              try {
+                dispatchPointerMouseSequence(topEl);
+                await sleep(200);
+                if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
+                  return true;
+                }
+              } catch {}
+
+              try {
+                topEl.click();
+                await sleep(250);
+                if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
+                  return true;
+                }
+              } catch {}
+            }
+
+            return false;
+          }
+
           const cards = (sectionIds || [])
             .map((sectionId) => collectSectionCardsById(sectionId))
             .flat();
@@ -796,34 +1003,187 @@ async function autoClickRewards() {
 
           if (!card) return false;
 
-          try {
-            card.scrollIntoView({ behavior: "smooth", block: "center" });
-          } catch {}
-
-          const clickTarget = card.querySelector("img") || card;
-          for (const type of ["mouseover", "mousedown", "mouseup"]) {
-            try {
-              clickTarget.dispatchEvent(
-                new MouseEvent(type, {
-                  view: window,
-                  bubbles: true,
-                  cancelable: true,
-                }),
-              );
-            } catch {}
+          const targets = getClickableTargets(card);
+          for (const target of targets) {
+            if (await tryActivateTarget(card, target)) {
+              return true;
+            }
           }
 
-          try {
-            card.click();
-          } catch {}
-
-          return true;
+          return false;
         },
       });
 
     return clicked;
   }
 
+  async function handleRewardChildTab(tabId) {
+    try {
+      const [{ result = { handled: false, completed: false, clicks: 0, reason: "unknown" } }] =
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          func: async () => {
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const normalizeText = (value) =>
+              (value || "").replace(/\s+/g, " ").trim();
+
+            const isVisible = (el) => {
+              if (!el || typeof el.getBoundingClientRect !== "function") return false;
+              const rect = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              return (
+                rect.width > 0 &&
+                rect.height > 0 &&
+                style.visibility !== "hidden" &&
+                style.display !== "none"
+              );
+            };
+
+            const isDisabled = (el) =>
+              !el ||
+              el.getAttribute("aria-disabled") === "true" ||
+              !!el.closest("[aria-disabled='true'], [data-disabled='true']") ||
+              el.disabled === true;
+
+            const getPageText = () =>
+              normalizeText(document.body?.innerText || document.body?.textContent || "").toLowerCase();
+
+            const isQuizLikePage = () => {
+              const url = location.href.toLowerCase();
+              const title = (document.title || "").toLowerCase();
+              const text = getPageText();
+              return (
+                /(?:[?&]form=dsetqu|[?&]form=quiz|wqoskey=|bingqa_|quizlanding)/i.test(url) ||
+                /\bquiz\b/.test(title) ||
+                /\bquiz\b/.test(text)
+              );
+            };
+
+            const isQuizCompleted = () => {
+              const text = getPageText();
+              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work/.test(text);
+            };
+
+            const clickElement = (el) => {
+              if (!el) return false;
+              try {
+                el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+              } catch {}
+              try {
+                el.focus({ preventScroll: true });
+              } catch {
+                try {
+                  el.focus();
+                } catch {}
+              }
+
+              const rect = el.getBoundingClientRect();
+              const common = {
+                view: window,
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                button: 0,
+                buttons: 1,
+                clientX: rect.left + Math.max(1, Math.min(rect.width - 1, rect.width / 2)),
+                clientY: rect.top + Math.max(1, Math.min(rect.height - 1, rect.height / 2)),
+              };
+
+              const steps = [
+                ["pointerover", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse" }],
+                ["pointerdown", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0.5 }],
+                ["mousedown", MouseEvent, {}],
+                ["pointerup", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0 }],
+                ["mouseup", MouseEvent, {}],
+                ["click", MouseEvent, {}],
+              ];
+
+              for (const [type, Ctor, extra] of steps) {
+                try {
+                  const EventCtor =
+                    Ctor === PointerEvent && typeof PointerEvent !== "function"
+                      ? MouseEvent
+                      : Ctor;
+                  el.dispatchEvent(new EventCtor(type, { ...common, ...extra }));
+                } catch {}
+              }
+
+              try {
+                el.click();
+              } catch {}
+              return true;
+            };
+
+            const getCandidateText = (el) =>
+              normalizeText(
+                el.innerText || el.textContent || el.getAttribute("aria-label") || el.value || "",
+              );
+
+            const buildCandidates = () => {
+              return Array.from(
+                document.querySelectorAll(
+                  "button, [role='button'], a[href], input[type='button'], input[type='submit'], label",
+                ),
+              )
+                .filter((el) => el instanceof HTMLElement)
+                .filter((el) => isVisible(el) && !isDisabled(el))
+                .map((el) => {
+                  const text = getCandidateText(el);
+                  let score = 0;
+                  if (!text || text.length > 120) score -= 100;
+                  if (/(^sign in$|^feedback$|^privacy$|^terms$|^rewards$|^search$|^images$|^videos$|^maps$|^news$|^all$|^back$|^next$)/i.test(text)) {
+                    score -= 100;
+                  }
+                  if (el.matches("button, [role='button'], input[type='button'], input[type='submit']")) {
+                    score += 40;
+                  }
+                  if (el.closest("main, [role='main'], form, [class*='quiz'], [id*='quiz']")) {
+                    score += 20;
+                  }
+                  if (text.length > 0 && text.length <= 80) score += 10;
+                  if (/answer|option|choice|true|false|yes|no/i.test(text)) score += 15;
+                  return { el, text, score };
+                })
+                .filter((item) => item.score > 0)
+                .sort((a, b) => b.score - a.score);
+            };
+
+            if (!isQuizLikePage()) {
+              return { handled: false, completed: false, clicks: 0, reason: "not_quiz" };
+            }
+
+            let clicks = 0;
+            for (let attempt = 0; attempt < 8; attempt++) {
+              if (isQuizCompleted()) {
+                return { handled: true, completed: true, clicks, reason: "completed" };
+              }
+
+              const candidates = buildCandidates();
+              if (!candidates.length) {
+                await sleep(1200);
+                continue;
+              }
+
+              clickElement(candidates[0].el);
+              clicks++;
+              await sleep(1800);
+            }
+
+            return {
+              handled: true,
+              completed: isQuizCompleted(),
+              clicks,
+              reason: isQuizCompleted() ? "completed" : "no_progress",
+            };
+          },
+        });
+
+      return result;
+    } catch (e) {
+      return { handled: false, completed: false, clicks: 0, reason: e?.message || "script_failed" };
+    }
+  }
   for (const url of rewardUrls) {
     console.log(`[Rewards] Processing ${url}`);
     const tabsBefore = await chrome.tabs.query({});
@@ -944,13 +1304,17 @@ async function autoClickRewards() {
         }
       }
 
-      const attemptedUrls = new Set();
+      const successfulCardKeys = new Set();
+      const cardAttemptCounts = new Map();
       const maxCardClicks = 12;
+      const maxAttemptsPerCard = 2;
 
       for (let i = 0; i < maxCardClicks; i++) {
         const rewardCards = await getRewardCards(tab.id);
         const nextCard = rewardCards.find(
-          (card) => !attemptedUrls.has(card.key),
+          (card) =>
+            !successfulCardKeys.has(card.key) &&
+            (cardAttemptCounts.get(card.key) || 0) < maxAttemptsPerCard,
         );
 
         if (!nextCard) {
@@ -958,13 +1322,13 @@ async function autoClickRewards() {
           break;
         }
 
-        attemptedUrls.add(nextCard.key);
+        const attemptNumber = (cardAttemptCounts.get(nextCard.key) || 0) + 1;
+        cardAttemptCounts.set(nextCard.key, attemptNumber);
         console.log(
-          `[Rewards] Clicking reward card ${i + 1}: ${nextCard.href} (${nextCard.key})`,
+          `[Rewards] Clicking reward card ${i + 1}: ${nextCard.href} (${nextCard.key}) attempt ${attemptNumber}`,
         );
 
-        await clickRewardCard(tab.id, nextCard.key);
-
+        const clicked = await clickRewardCard(tab.id, nextCard.key);
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
         const currentTabs = await chrome.tabs.query({});
@@ -978,11 +1342,40 @@ async function autoClickRewards() {
           try {
             await waitForTabComplete(childTabId, 10000);
           } catch {}
+
+          const childResult = await handleRewardChildTab(childTabId);
+          if (childResult.handled) {
+            console.log(
+              `[Rewards] Child tab ${childTabId} handled=${childResult.handled} completed=${childResult.completed} clicks=${childResult.clicks} reason=${childResult.reason}`,
+            );
+          }
+        }
+
+        if (newTabIds.length) {
+          try {
+            await chrome.tabs.remove(newTabIds);
+            console.log(`[Rewards] Closed ${newTabIds.length} reward child tab(s)`);
+          } catch (e) {
+            console.warn("[Rewards] Failed closing reward child tab(s):", e);
+          }
         }
 
         await chrome.tabs.reload(tab.id);
         await waitForTabComplete(tab.id);
         await new Promise((r) => setTimeout(r, 2000));
+
+        const refreshedCards = await getRewardCards(tab.id);
+        const stillActionable = refreshedCards.some((card) => card.key === nextCard.key);
+        const completed = !stillActionable;
+
+        if (completed) {
+          successfulCardKeys.add(nextCard.key);
+        }
+
+        console.log(
+          `[Rewards] Reward card result ${completed ? "completed" : "not_completed"}: ` +
+            `${nextCard.key} (clicked=${clicked}, childTabs=${newTabIds.length}, attempts=${attemptNumber})`,
+        );
       }
     } finally {
       chrome.tabs.onCreated.removeListener(onCreated);
