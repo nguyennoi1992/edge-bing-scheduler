@@ -4,6 +4,7 @@ import { buildQueries } from "./words.js";
 const ALARM_NAME = "bingScheduler";
 const BADGE_ALARM = "badgeTick";
 const REWARDS_SETTLE_MS = 8000;
+const REWARD_CHILD_SYNC_MS = 5000;
 
 const DEFAULTS = {
   enabled: true,
@@ -1184,7 +1185,7 @@ async function autoClickRewards() {
       return { handled: false, completed: false, clicks: 0, reason: e?.message || "script_failed" };
     }
   }
-  for (const url of rewardUrls) {
+  async function processRewardUrl(url) {
     console.log(`[Rewards] Processing ${url}`);
     const tabsBefore = await chrome.tabs.query({});
     const baselineTabIds = new Set(
@@ -1306,6 +1307,7 @@ async function autoClickRewards() {
 
       const successfulCardKeys = new Set();
       const cardAttemptCounts = new Map();
+      const processedRewardChildTabIds = new Set();
       const maxCardClicks = 12;
       const maxAttemptsPerCard = 2;
 
@@ -1336,7 +1338,8 @@ async function autoClickRewards() {
           .map((t) => t.id)
           .filter((id) => Number.isInteger(id))
           .filter((id) => !baselineTabIds.has(id))
-          .filter((id) => id !== tab.id);
+          .filter((id) => id !== tab.id)
+          .filter((id) => !processedRewardChildTabIds.has(id));
 
         for (const childTabId of newTabIds) {
           try {
@@ -1344,6 +1347,7 @@ async function autoClickRewards() {
           } catch {}
 
           const childResult = await handleRewardChildTab(childTabId);
+          processedRewardChildTabIds.add(childTabId);
           if (childResult.handled) {
             console.log(
               `[Rewards] Child tab ${childTabId} handled=${childResult.handled} completed=${childResult.completed} clicks=${childResult.clicks} reason=${childResult.reason}`,
@@ -1352,12 +1356,10 @@ async function autoClickRewards() {
         }
 
         if (newTabIds.length) {
-          try {
-            await chrome.tabs.remove(newTabIds);
-            console.log(`[Rewards] Closed ${newTabIds.length} reward child tab(s)`);
-          } catch (e) {
-            console.warn("[Rewards] Failed closing reward child tab(s):", e);
-          }
+          console.log(
+            `[Rewards] Keeping ${newTabIds.length} reward child tab(s) open for sync before final cleanup`,
+          );
+          await new Promise((r) => setTimeout(r, REWARD_CHILD_SYNC_MS));
         }
 
         await chrome.tabs.reload(tab.id);
@@ -1407,6 +1409,18 @@ async function autoClickRewards() {
       }
     }
   }
+
+  const rewardResults = await Promise.allSettled(
+    rewardUrls.map((url) => processRewardUrl(url)),
+  );
+  rewardResults.forEach((result, index) => {
+    const rewardUrl = rewardUrls[index];
+    if (result.status === "rejected") {
+      console.warn(`[Rewards] Processing failed for ${rewardUrl}:`, result.reason);
+    } else {
+      console.log(`[Rewards] Finished processing ${rewardUrl}`);
+    }
+  });
 }
 // ---------------- Bing search logic ----------------
 async function typeInBing(query, perCharDelayMs = 80) {
