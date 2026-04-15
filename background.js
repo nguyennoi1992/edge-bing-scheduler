@@ -5,6 +5,10 @@ const ALARM_NAME = "bingScheduler";
 const BADGE_ALARM = "badgeTick";
 const REWARDS_SETTLE_MS = 8000;
 const REWARD_CHILD_SYNC_MS = 5000;
+const REWARD_URL_TIMEOUT_MS = 150000;
+const DEBUG_LOGS_KEY = 'debugLogs';
+const DEBUG_LOG_RETENTION_DAYS = 7;
+const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 const DEFAULTS = {
   enabled: true,
@@ -19,6 +23,37 @@ const DEFAULTS = {
 async function getConfig() {
   const data = await chrome.storage.sync.get(DEFAULTS);
   return { ...DEFAULTS, ...data };
+}
+function pruneDebugLogs(logs, now = Date.now()) {
+  const cutoff = now - DEBUG_LOG_RETENTION_MS;
+  return (Array.isArray(logs) ? logs : []).filter((entry) => {
+    const ts = Number(entry?.ts);
+    return Number.isFinite(ts) && ts >= cutoff;
+  });
+}
+
+async function appendDebugLog(level, phase, message, meta = {}) {
+  try {
+    const now = Date.now();
+    const entry = {
+      id: String(now) + '_' + Math.random().toString(36).slice(2, 8),
+      ts: now,
+      level,
+      phase,
+      message,
+      meta,
+    };
+    const data = await chrome.storage.local.get(DEBUG_LOGS_KEY);
+    const logs = pruneDebugLogs(data[DEBUG_LOGS_KEY], now);
+    logs.push(entry);
+    await chrome.storage.local.set({ [DEBUG_LOGS_KEY]: logs });
+  } catch (e) {
+    console.warn('[DebugLog] Failed to persist log:', e);
+  }
+}
+
+async function clearDebugLogs() {
+  await chrome.storage.local.set({ [DEBUG_LOGS_KEY]: [] });
 }
 
 let runTicker = null;
@@ -61,6 +96,19 @@ async function updateBadge() {
   await chrome.action.setBadgeText({ text: mins >= 1 ? `${mins}m` : "<1m" });
 }
 
+async function ensureRunTicker() {
+  const { running } = await chrome.storage.sync.get(["running"]);
+  if (running) {
+    if (!runTicker) {
+      runTicker = setInterval(updateBadge, 1000);
+    }
+  } else if (runTicker) {
+    clearInterval(runTicker);
+    runTicker = null;
+  }
+}
+
+
 function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -85,6 +133,7 @@ function getQueryList(cfg) {
 // ---------------- Bing Rewards auto click ----------------
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
+  await appendDebugLog("info", "rewards", "Rewards phase started");
   const rewardSectionIds = ["moreactivities", "dailyset", "exploreonbing"];
   const rewardUrls = [
     "https://rewards.bing.com/earn",
@@ -287,8 +336,10 @@ async function autoClickRewards() {
 
       const descendants = [];
       for (const [id] of openerMap) {
+        const seenOpeners = new Set();
         let opener = openerMap.get(id);
-        while (Number.isInteger(opener)) {
+        while (Number.isInteger(opener) && !seenOpeners.has(opener)) {
+          seenOpeners.add(opener);
           if (opener === parentTabId) {
             descendants.push(id);
             break;
@@ -658,7 +709,7 @@ async function autoClickRewards() {
 
               for (const a of anchors) {
                 if (!a || !isVisible(a)) continue;
-                if (!a.querySelector("img")) continue;
+                if (!a.querySelector("img") && !a.querySelector("mee-icon") && !a.querySelector("svg") && !a.querySelector(".mee-icon")) continue;
                 if (
                   a.getAttribute("aria-disabled") === "true" ||
                   a.closest("[aria-disabled='true'], [data-disabled='true']")
@@ -780,7 +831,7 @@ async function autoClickRewards() {
             expandSectionIfCollapsed(section);
 
             return Array.from(section.querySelectorAll("a[href]"))
-              .filter((a) => a && isVisible(a) && a.querySelector("img"))
+              .filter((a) => a && isVisible(a) && (a.querySelector("img") || a.querySelector("mee-icon") || a.querySelector("svg") || a.querySelector(".mee-icon")))
               .filter((a) => {
                 return !(
                   a.getAttribute("aria-disabled") === "true" ||
@@ -829,6 +880,8 @@ async function autoClickRewards() {
               card.querySelector("[role='button']"),
               card.querySelector("button"),
               card.querySelector("img"),
+              card.querySelector("mee-icon"),
+              card.querySelector("svg"),
               card,
             ].filter(Boolean);
 
@@ -1055,15 +1108,15 @@ async function autoClickRewards() {
               const title = (document.title || "").toLowerCase();
               const text = getPageText();
               return (
-                /(?:[?&]form=dsetqu|[?&]form=quiz|wqoskey=|bingqa_|quizlanding)/i.test(url) ||
-                /\bquiz\b/.test(title) ||
-                /\bquiz\b/.test(text)
+                /(?:[?&]form=dsetqu|[?&]form=quiz|wqoskey=|bingqa_|quizlanding|poll)/i.test(url) ||
+                /\b(quiz|poll)\b/i.test(title) ||
+                /\b(quiz|poll)\b/i.test(text)
               );
             };
 
             const isQuizCompleted = () => {
               const text = getPageText();
-              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work/.test(text);
+              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work|thank you for participating/i.test(text);
             };
 
             const clickElement = (el) => {
@@ -1133,7 +1186,7 @@ async function autoClickRewards() {
                   const text = getCandidateText(el);
                   let score = 0;
                   if (!text || text.length > 120) score -= 100;
-                  if (/(^sign in$|^feedback$|^privacy$|^terms$|^rewards$|^search$|^images$|^videos$|^maps$|^news$|^all$|^back$|^next$)/i.test(text)) {
+                  if (/(^sign in$|^feedback$|^privacy$|^terms$|^rewards$|^search$|^images$|^videos$|^maps$|^news$|^all$|^back$)/i.test(text)) {
                     score -= 100;
                   }
                   if (el.matches("button, [role='button'], input[type='button'], input[type='submit']")) {
@@ -1144,6 +1197,8 @@ async function autoClickRewards() {
                   }
                   if (text.length > 0 && text.length <= 80) score += 10;
                   if (/answer|option|choice|true|false|yes|no/i.test(text)) score += 15;
+                  if (/start|play|begin|continue|next|submit|check answer|see results?/i.test(text)) score += 35;
+                  if (el.closest(".btOption, .wk_option, .geSlide, #rc-poll-container, .poll-container")) score += 30; // Strongly boost poll/quiz options
                   return { el, text, score };
                 })
                 .filter((item) => item.score > 0)
@@ -1155,7 +1210,7 @@ async function autoClickRewards() {
             }
 
             let clicks = 0;
-            for (let attempt = 0; attempt < 8; attempt++) {
+            for (let attempt = 0; attempt < 12; attempt++) {
               if (isQuizCompleted()) {
                 return { handled: true, completed: true, clicks, reason: "completed" };
               }
@@ -1186,7 +1241,11 @@ async function autoClickRewards() {
     }
   }
   async function processRewardUrl(url) {
-    console.log(`[Rewards] Processing ${url}`);
+    const deadlineAt = Date.now() + REWARD_URL_TIMEOUT_MS;
+    const timedOut = () => Date.now() >= deadlineAt;
+
+    console.log("[Rewards] Processing " + url);
+    await appendDebugLog("info", "rewards", "Processing reward URL", { url });
     const tabsBefore = await chrome.tabs.query({});
     const baselineTabIds = new Set(
       tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)),
@@ -1226,6 +1285,10 @@ async function autoClickRewards() {
         const maxQuestCards = 8;
 
         for (let i = 0; i < maxQuestCards; i++) {
+          if (timedOut()) {
+            console.warn("[Rewards] Timeout budget reached while processing quest cards for " + url);
+            break;
+          }
           const questCards = await getQuestCards(tab.id);
           const nextQuest = questCards.find((card) => !attemptedQuestKeys.has(card.key));
 
@@ -1250,6 +1313,10 @@ async function autoClickRewards() {
           const maxQuestActivities = 10;
 
           for (let j = 0; j < maxQuestActivities; j++) {
+            if (timedOut()) {
+              console.warn("[Rewards] Timeout budget reached while processing quest activities for " + url);
+              break;
+            }
             const questActivities = await getQuestActivities(tab.id);
             const nextActivity = questActivities.find(
               (activity) => !attemptedActivityKeys.has(activity.key),
@@ -1312,6 +1379,10 @@ async function autoClickRewards() {
       const maxAttemptsPerCard = 2;
 
       for (let i = 0; i < maxCardClicks; i++) {
+        if (timedOut()) {
+          console.warn("[Rewards] Timeout budget reached while processing reward cards for " + url);
+          break;
+        }
         const rewardCards = await getRewardCards(tab.id);
         const nextCard = rewardCards.find(
           (card) =>
@@ -1410,17 +1481,16 @@ async function autoClickRewards() {
     }
   }
 
-  const rewardResults = await Promise.allSettled(
-    rewardUrls.map((url) => processRewardUrl(url)),
-  );
-  rewardResults.forEach((result, index) => {
-    const rewardUrl = rewardUrls[index];
-    if (result.status === "rejected") {
-      console.warn(`[Rewards] Processing failed for ${rewardUrl}:`, result.reason);
-    } else {
-      console.log(`[Rewards] Finished processing ${rewardUrl}`);
+  for (const url of rewardUrls) {
+    try {
+      await processRewardUrl(url);
+      console.log(`[Rewards] Finished processing ${url}`);
+      await appendDebugLog("success", "rewards", /dashboard/i.test(url) ? "Dashboard completed" : /earn/i.test(url) ? "Earn completed" : "Reward URL completed", { url });
+    } catch (e) {
+      console.warn(`[Rewards] Processing failed for ${url}:`, e);
+      await appendDebugLog("error", "rewards", "Reward URL failed", { url, error: String(e) });
     }
-  });
+  }
 }
 // ---------------- Bing search logic ----------------
 async function typeInBing(query, perCharDelayMs = 80) {
@@ -1527,6 +1597,9 @@ async function runTask() {
 
   // 1. First run rewards auto-click
   await autoClickRewards();
+  await appendDebugLog("success", "rewards", "Rewards phase completed");
+
+  await appendDebugLog("info", "search", "Search phase started");
 
   // 2. Then continue with Bing searches
   const queries = getQueryList(cfg);
@@ -1545,16 +1618,13 @@ async function runTask() {
   });
   await updateBadge();
 
-  if (runTicker) {
-    clearInterval(runTicker);
-    runTicker = null;
-  }
-  runTicker = setInterval(updateBadge, 1000);
+  await ensureRunTicker();
 
   let cumulativeDelaySecs = 0;
   queries.forEach((q, idx) => {
     cumulativeDelaySecs += perOpenDelays[idx];
     setTimeout(async () => {
+      await appendDebugLog("info", "search", "Search opened", { query: q, index: idx + 1, total: queries.length });
       await openBingAndType(q);
 
       if (idx + 1 < perOpenDelays.length) {
@@ -1571,33 +1641,35 @@ async function runTask() {
 
   const totalDelaySecs = perOpenDelays.reduce((a, b) => a + b, 0);
   setTimeout(async () => {
-    if (runTicker) {
-      clearInterval(runTicker);
-      runTicker = null;
-    }
     await chrome.storage.sync.set({
       running: false,
       runEndsAt: null,
       nextOpenAt: null,
     });
     await updateBadge();
+    await ensureRunTicker();
+    await appendDebugLog("success", "search", "Search phase completed", { totalQueries: queries.length });
   }, totalDelaySecs * 1000);
 }
 
 async function startRun(source = "unknown") {
   if (runPromise) {
     console.log(`[Run] Skip ${source}; a run is already in progress.`);
+    await appendDebugLog("warn", "run", "Run skipped because another run is active", { source });
     return runPromise;
   }
   runPromise = (async () => {
     try {
       console.log(`[Run] Started from ${source}`);
+      await appendDebugLog("info", "run", "Run started", { source });
       await runTask();
     } catch (e) {
       console.error(`[Run] Failed from ${source}:`, e);
+      await appendDebugLog("error", "run", "Run failed", { source, error: String(e) });
     } finally {
       runPromise = null;
       console.log(`[Run] Finished from ${source}`);
+      await appendDebugLog("info", "run", "Run finished", { source });
     }
   })();
   return runPromise;
@@ -1647,6 +1719,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     "nextOpenAt" in changes
   ) {
     updateBadge();
+    ensureRunTicker();
   }
 });
 
@@ -1663,11 +1736,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
     return true;
   }
+  if (msg.type === "CLEAR_DEBUG_LOGS") {
+    clearDebugLogs()
+      .then(() => sendResponse?.({ ok: true }))
+      .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
+    return true;
+  }
 });
 
 chrome.runtime.onInstalled.addListener(() => {
   scheduleAlarm();
   updateBadge();
+ensureRunTicker();
 });
 
 scheduleAlarm();
