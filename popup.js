@@ -2,7 +2,23 @@ const DEBUG_LOGS_KEY = "debugLogs";
 
 function formatDate(ts) {
   if (!ts) return "—";
-  return new Date(ts).toLocaleString();
+  const d = new Date(ts);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const MM = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const HH = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${dd}/${MM}/${yyyy} ${HH}:${mm}:${ss}`;
+}
+
+function formatDayKey(ts) {
+  if (!ts) return "Unknown date";
+  const d = new Date(ts);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const MM = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}/${MM}/${yyyy}`;
 }
 
 function formatMeta(meta) {
@@ -20,19 +36,53 @@ function toLogLine(entry) {
   return `${formatDate(entry.ts)} | ${phase} | ${message}${metaText ? ` | ${metaText}` : ""}`;
 }
 
+function groupLogsByDay(logs) {
+  const groups = new Map();
+  for (const entry of [...logs].reverse()) {
+    const key = formatDayKey(entry.ts);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  return [...groups.entries()];
+}
+
 function renderLogs(logs) {
   const logList = document.getElementById("logList");
+  logList.innerHTML = "";
   if (!Array.isArray(logs) || !logs.length) {
     logList.innerHTML = '<div class="empty">No logs yet</div>';
     return;
   }
 
-  const items = [...logs].reverse().map((entry) => {
-    const level = entry.level || "info";
-    return `<div class="log-item ${level}"><div class="log-line">${toLogLine(entry)}</div></div>`;
-  });
+  const groups = groupLogsByDay(logs);
+  groups.forEach(([day, entries]) => {
+    const groupEl = document.createElement("div");
+    groupEl.className = "log-group";
 
-  logList.innerHTML = items.join("");
+    const header = document.createElement("div");
+    header.className = "log-group-date";
+    header.innerHTML = `<span class="log-group-arrow">▼</span> ${day} <span class="log-group-count">(${entries.length})</span>`;
+
+    const body = document.createElement("div");
+    body.className = "log-group-body";
+
+    entries.forEach((entry) => {
+      const level = entry.level || "info";
+      const item = document.createElement("div");
+      item.className = `log-item ${level}`;
+      item.innerHTML = `<div class="log-line">${toLogLine(entry)}</div>`;
+      body.appendChild(item);
+    });
+
+    header.addEventListener("click", () => {
+      const collapsed = body.classList.toggle("collapsed");
+      header.querySelector(".log-group-arrow").textContent = collapsed ? "▶" : "▼";
+    });
+
+    groupEl.appendChild(header);
+    groupEl.appendChild(body);
+    logList.appendChild(groupEl);
+  });
 }
 
 async function getLogs() {
@@ -49,7 +99,7 @@ async function exportLogs() {
   const logs = await getLogs();
   const lines = [
     `Bing Scheduler Debug Logs`,
-    `Exported: ${new Date().toLocaleString()}`,
+    `Exported: ${formatDate(Date.now())}`,
     `Retention: last 7 days`,
     `Count: ${logs.length}`,
     "",
@@ -77,7 +127,7 @@ async function load() {
   const { enabled, time, nextRunAt } = await chrome.storage.sync.get(["enabled", "time", "nextRunAt"]);
   document.getElementById("enabled").checked = !!enabled;
   document.getElementById("time").textContent = time || "—";
-  document.getElementById("next").textContent = nextRunAt ? new Date(nextRunAt).toLocaleString() : "—";
+  document.getElementById("next").textContent = nextRunAt ? formatDate(nextRunAt) : "—";
   await loadLogs();
 
   const openSidebarButton = document.getElementById("openSidebar");
@@ -99,7 +149,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     if (changes.nextRunAt) {
       const v = changes.nextRunAt.newValue;
-      document.getElementById("next").textContent = v ? new Date(v).toLocaleString() : "—";
+      document.getElementById("next").textContent = v ? formatDate(v) : "—";
     }
     if (changes.enabled) {
       document.getElementById("enabled").checked = !!changes.enabled.newValue;

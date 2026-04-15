@@ -54,8 +54,41 @@
       overflow: auto;
       display: flex;
       flex-direction: column;
+      gap: 12px;
+    }
+    .log-group {
+      display: flex;
+      flex-direction: column;
       gap: 8px;
     }
+    .log-group-date {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      background: rgba(23, 27, 43, 0.92);
+      padding: 4px 6px;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 6px;
+      transition: background 0.15s;
+    }
+    .log-group-date:hover { background: rgba(110, 168, 254, 0.12); }
+    .log-group-arrow { font-size: 10px; flex-shrink: 0; }
+    .log-group-count { color: var(--muted); font-weight: 400; }
+    .log-group-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: hidden;
+      transition: opacity 0.2s;
+    }
+    .log-group-body.collapsed { display: none; }
     .log-item {
       border: 1px solid var(--border);
       border-radius: 10px;
