@@ -243,7 +243,7 @@ async function autoClickRewards() {
             const labels = elements.filter((el) => {
               if (!(el instanceof HTMLElement)) return false;
               if (!isVisible(el)) return false;
-              return getNodeText(el).toLowerCase() === "ready to claim";
+              return /^ready to claim$|^sẵn sàng nhận$|^可领取$|^prêt à réclamer$|^bereit zum einlösen$|^listo para reclamar$|^готово к получению$/i.test(getNodeText(el).toLowerCase());
             });
 
             for (const labelEl of labels) {
@@ -676,6 +676,7 @@ async function autoClickRewards() {
         func: (sectionIds) => {
           return new Promise((resolve) => {
             const isVisible = (el) => {
+              if (!el || typeof el.getBoundingClientRect !== "function") return false;
               const rect = el.getBoundingClientRect();
               const style = window.getComputedStyle(el);
               return (
@@ -686,8 +687,12 @@ async function autoClickRewards() {
               );
             };
 
+            const normalizeText = (value) =>
+              (value || "").replace(/\s+/g, " ").trim();
+
             function expandSectionIfCollapsed(section) {
               if (!section) return;
+              // React Aria Disclosure pattern: button[slot='trigger']
               const trigger = section.querySelector(
                 "button[slot='trigger'][aria-expanded='false']",
               );
@@ -696,6 +701,42 @@ async function autoClickRewards() {
                   trigger.click();
                 } catch {}
               }
+              // Also handle aria-expanded on buttons with aria-controls
+              const collapsedBtns = section.querySelectorAll(
+                "button[aria-expanded='false'][aria-controls]",
+              );
+              for (const btn of collapsedBtns) {
+                try { btn.click(); } catch {}
+              }
+            }
+
+            function isCardCompleted(cardEl) {
+              if (!cardEl) return false;
+              // i18n pattern for "completed"/"done" across languages
+              const completedRe = /\bcompleted\b|\bdone\b|hoàn thành|đã xong|已完成|完了|terminé|abgeschlossen|completado|завершено/i;
+
+              // Method 1: CSS-class based (locale-independent) – success badge with checkmark SVG
+              const successBadge = cardEl.querySelector(
+                "[class*='statusSuccess']"
+              );
+              if (successBadge && successBadge.querySelector("svg")) {
+                return true;
+              }
+
+              // Method 2: Check for completed text in the status/metadata area
+              const statusEls = cardEl.querySelectorAll(
+                "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
+              );
+              for (const el of statusEls) {
+                const t = normalizeText(el.textContent || "").toLowerCase();
+                if (completedRe.test(t)) return true;
+              }
+
+              // Method 3: Legacy full-text fallback
+              const fullText = normalizeText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
+              if (completedRe.test(fullText)) return true;
+
+              return false;
             }
 
             function collectSectionCardsById(sectionId) {
@@ -703,13 +744,42 @@ async function autoClickRewards() {
               if (!section) return [];
               expandSectionIfCollapsed(section);
 
-              const anchors = Array.from(section.querySelectorAll("a[href]"));
+              // Broad search: find all <a> inside grids first, then fallback to all <a>
+              const gridSelectors = [
+                "div.grid.gap-3.lg\\:grid-cols-2.xl\\:grid-cols-3",
+                "div.grid.gap-3.lg\\:grid-cols-2.\\32 xl\\:grid-cols-3",
+                "div[class*='grid'][class*='gap']",
+                "div.grid.gap-3",
+              ];
+              let gridAnchors = [];
+              for (const selector of gridSelectors) {
+                gridAnchors = Array.from(
+                  section.querySelectorAll(`${selector} > a[href]`)
+                );
+                if (gridAnchors.length) break;
+              }
+              // Fallback: all anchor children within the disclosure panel
+              if (!gridAnchors.length) {
+                const panel = section.querySelector(
+                  ".react-aria-DisclosurePanel, [role='group']"
+                );
+                gridAnchors = Array.from(
+                  (panel || section).querySelectorAll("a[href]")
+                );
+              }
+
               const unique = [];
               const seen = new Set();
 
-              for (const a of anchors) {
+              for (const a of gridAnchors) {
                 if (!a || !isVisible(a)) continue;
-                if (!a.querySelector("img") && !a.querySelector("mee-icon") && !a.querySelector("svg") && !a.querySelector(".mee-icon")) continue;
+                // Card must have visual content (img, svg, icon)
+                if (
+                  !a.querySelector("img") &&
+                  !a.querySelector("mee-icon") &&
+                  !a.querySelector("svg") &&
+                  !a.querySelector(".mee-icon")
+                ) continue;
                 if (
                   a.getAttribute("aria-disabled") === "true" ||
                   a.closest("[aria-disabled='true'], [data-disabled='true']")
@@ -720,22 +790,32 @@ async function autoClickRewards() {
                 const href = a.getAttribute("href") || "";
                 if (!href || href === "/earn") continue;
 
-                const text = (a.innerText || a.textContent || "").toLowerCase();
-                if (text.includes("see more tasks") || /\bcompleted\b|\bdone\b/.test(text)) continue;
+                const text = normalizeText(a.innerText || a.textContent || "").toLowerCase();
+                if (text.includes("see more tasks") || text.includes("earn more")) continue;
 
-                const key = `${href}|${text.replace(/\s+/g, " ").trim()}`;
+                // Check completed status using robust badge/status checks
+                if (isCardCompleted(a)) continue;
+
+                const key = `${href}|${text}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
                 unique.push(a);
               }
 
+              console.log(
+                `[Rewards] Section #${sectionId}: found ${unique.length} actionable card(s)`,
+              );
               return unique;
             }
 
             function buildCardKey(card) {
               const href = card?.href || card?.getAttribute?.("href") || "";
               const titleEl =
+                card.querySelector("p.text-globalBody2Strong") ||
                 card.querySelector("p.text-body1Strong") ||
+                card.querySelector("p[class*=\"globalBody2Strong\"]") ||
+                card.querySelector("p[class*=\"body1Strong\"]") ||
+                card.querySelector("p") ||
                 card.querySelector("img[alt]");
               const rawTitle =
                 titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
@@ -760,8 +840,10 @@ async function autoClickRewards() {
             }
 
             let attempts = 0;
-            const maxAttempts = 8;
-            const pollMs = 1000;
+            const maxAttempts = 20;
+            const pollMs = 1500;
+            let prevCount = -1;
+            let stableRounds = 0;
 
             const timer = setInterval(() => {
               attempts++;
@@ -770,10 +852,18 @@ async function autoClickRewards() {
                 .flat();
               const cards = collectCards(sectionCards);
 
-              if (cards.length || attempts >= maxAttempts) {
+              // Wait for card count to stabilize (2 consecutive same counts)
+              if (cards.length === prevCount) {
+                stableRounds++;
+              } else {
+                stableRounds = 0;
+              }
+              prevCount = cards.length;
+
+              if ((cards.length > 0 && stableRounds >= 1) || attempts >= maxAttempts) {
                 clearInterval(timer);
                 console.log(
-                  `[Rewards] Actionable cards found across sections: ${sectionCards.length}`,
+                  `[Rewards] Actionable cards found across sections: ${cards.length} (from ${sectionCards.length} section cards, after ${attempts} polls)`,
                 );
                 resolve(cards);
               }
@@ -796,6 +886,7 @@ async function autoClickRewards() {
             (value || "").replace(/\s+/g, " ").trim();
 
           const isVisible = (el) => {
+            if (!el || typeof el.getBoundingClientRect !== "function") return false;
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
             return (
@@ -823,6 +914,41 @@ async function autoClickRewards() {
                 trigger.click();
               } catch {}
             }
+            // Also handle aria-expanded on buttons with aria-controls
+            const collapsedBtns = section.querySelectorAll(
+              "button[aria-expanded='false'][aria-controls]",
+            );
+            for (const btn of collapsedBtns) {
+              try { btn.click(); } catch {}
+            }
+          }
+
+          function isCardCompleted(cardEl) {
+            if (!cardEl) return false;
+            // i18n pattern for "completed"/"done" across languages
+            const completedRe = /\bcompleted\b|\bdone\b|hoàn thành|đã xong|已完成|完了|terminé|abgeschlossen|completado|завершено/i;
+
+            // Method 1: CSS-class based (locale-independent) – success badge with checkmark SVG
+            const successBadge = cardEl.querySelector(
+              "[class*='statusSuccess']"
+            );
+            if (successBadge && successBadge.querySelector("svg")) {
+              return true;
+            }
+
+            // Method 2: Check for completed text in the status/metadata area
+            const statusEls = cardEl.querySelectorAll(
+              "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
+            );
+            for (const el of statusEls) {
+              const t = normalizeText(el.textContent || "").toLowerCase();
+              if (completedRe.test(t)) return true;
+            }
+
+            // Full-text fallback
+            const fullText = normalizeText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
+            if (completedRe.test(fullText)) return true;
+            return false;
           }
 
           function collectSectionCardsById(sectionId) {
@@ -830,33 +956,53 @@ async function autoClickRewards() {
             if (!section) return [];
             expandSectionIfCollapsed(section);
 
-            return Array.from(section.querySelectorAll("a[href]"))
+            const gridSelectors = [
+              "div.grid.gap-3.lg\\:grid-cols-2.xl\\:grid-cols-3",
+              "div.grid.gap-3.lg\\:grid-cols-2.\\32 xl\\:grid-cols-3",
+              "div[class*='grid'][class*='gap']",
+              "div.grid.gap-3",
+            ];
+            let gridAnchors = [];
+            for (const selector of gridSelectors) {
+              gridAnchors = Array.from(
+                section.querySelectorAll(`${selector} > a[href]`)
+              );
+              if (gridAnchors.length) break;
+            }
+            if (!gridAnchors.length) {
+              const panel = section.querySelector(
+                ".react-aria-DisclosurePanel, [role='group']"
+              );
+              gridAnchors = Array.from(
+                (panel || section).querySelectorAll("a[href]")
+              );
+            }
+
+            return gridAnchors
               .filter((a) => a && isVisible(a) && (a.querySelector("img") || a.querySelector("mee-icon") || a.querySelector("svg") || a.querySelector(".mee-icon")))
+              .filter((a) => !isDisabled(a))
               .filter((a) => {
-                return !(
-                  a.getAttribute("aria-disabled") === "true" ||
-                  a.closest("[aria-disabled='true'], [data-disabled='true']")
-                );
-              })
-              .filter((a) => {
+                const href = a.getAttribute("href") || "";
+                if (!href || href === "/earn") return false;
                 const text = normalizeText(a.innerText || a.textContent || "").toLowerCase();
-                return !/\bcompleted\b|\bdone\b/.test(text);
+                if (text.includes("see more tasks") || text.includes("earn more")) return false;
+                return !isCardCompleted(a);
               });
           }
 
           function buildCardKey(card) {
             const href = card?.href || card?.getAttribute?.("href") || "";
             const titleEl =
+              card.querySelector("p.text-globalBody2Strong") ||
               card.querySelector("p.text-body1Strong") ||
+              card.querySelector("p[class*=\"globalBody2Strong\"]") ||
+              card.querySelector("p[class*=\"body1Strong\"]") ||
+              card.querySelector("p") ||
               card.querySelector("img[alt]");
             const rawTitle =
               titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
             const title = rawTitle.replace(/\s+/g, " ").trim().toLowerCase();
             return `${href}|${title}`;
-          }
-
-          function getCardStatusText(card) {
-            return normalizeText(card?.innerText || card?.textContent || "").toLowerCase();
           }
 
           function getCardSignature(card) {
@@ -867,7 +1013,7 @@ async function autoClickRewards() {
               card.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ||
               "";
             const disabled = isDisabled(card) ? "disabled" : "enabled";
-            const status = getCardStatusText(card);
+            const status = normalizeText(card?.innerText || card?.textContent || "").toLowerCase();
             return `${href}|${expanded}|${disabled}|${status}`;
           }
 
@@ -875,9 +1021,11 @@ async function autoClickRewards() {
             if (!card) return [];
 
             const candidates = [
-              card.querySelector("[data-react-aria-pressable='true']"),
-              card.querySelector("[role='link']"),
-              card.querySelector("[role='button']"),
+              card.matches?.("[data-react-aria-pressable=\"true\"], a[href], [role=\"link\"], [role=\"button\"], button") ? card : null,
+              card.querySelector("[data-react-aria-pressable=\"true\"]"),
+              card.querySelector("a[href]"),
+              card.querySelector("[role=\"link\"]"),
+              card.querySelector("[role=\"button\"]"),
               card.querySelector("button"),
               card.querySelector("img"),
               card.querySelector("mee-icon"),
@@ -948,41 +1096,17 @@ async function autoClickRewards() {
             return true;
           }
 
-          function dispatchKeyboardSequence(target, key) {
-            if (!target) return false;
-            const code = key === " " ? "Space" : key;
-
-            try {
-              target.focus({ preventScroll: true });
-            } catch {
-              try {
-                target.focus();
-              } catch {}
-            }
-
-            for (const type of ["keydown", "keypress", "keyup"]) {
-              try {
-                target.dispatchEvent(
-                  new KeyboardEvent(type, {
-                    key,
-                    code,
-                    bubbles: true,
-                    cancelable: true,
-                    composed: true,
-                  }),
-                );
-              } catch {}
-            }
-
-            return true;
-          }
-
           async function tryActivateTarget(card, target) {
             if (!target || !isVisible(target) || isDisabled(target)) return false;
 
             const beforeSignature = getCardSignature(card);
-            const beforeHref = card?.href || card?.getAttribute?.("href") || "";
             const beforeUrl = location.href;
+
+            // Detect if this card opens in a new tab (target="_blank" links)
+            const isExternalLink =
+              (card.getAttribute("target") === "_blank") ||
+              (target.getAttribute?.("target") === "_blank") ||
+              (card.closest?.("a[target='_blank']") !== null);
 
             try {
               target.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
@@ -996,6 +1120,39 @@ async function autoClickRewards() {
               } catch {}
             }
 
+            // For external links (target="_blank"), clicking opens a new tab
+            // but doesn't change the current page's URL or DOM.
+            // We must click the actual card element (not window.open) for Bing to register it.
+            if (isExternalLink) {
+              // Full pointer+mouse event sequence on the target
+              try {
+                dispatchPointerMouseSequence(target);
+                await sleep(300);
+              } catch {}
+
+              // Native .click()
+              try {
+                target.click();
+                await sleep(300);
+              } catch {}
+
+              // Keyboard Enter as fallback
+              try {
+                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+                for (const type of ["keydown", "keypress", "keyup"]) {
+                  target.dispatchEvent(
+                    new KeyboardEvent(type, { key: "Enter", code: "Enter", bubbles: true, cancelable: true, composed: true }),
+                  );
+                }
+                await sleep(300);
+              } catch {}
+
+              const linkHref = card.href || card.getAttribute("href") || "";
+              console.log(`[Rewards] Clicked external link card: ${linkHref.substring(0, 80)}`);
+              return true; // Caller detects new tabs separately
+            }
+
+            // For same-page navigation or in-page state changes
             try {
               dispatchPointerMouseSequence(target);
               await sleep(200);
@@ -1012,9 +1169,16 @@ async function autoClickRewards() {
               }
             } catch {}
 
+            // Keyboard fallback (Enter / Space)
             for (const key of ["Enter", " "]) {
               try {
-                dispatchKeyboardSequence(target, key);
+                const code = key === " " ? "Space" : key;
+                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+                for (const type of ["keydown", "keypress", "keyup"]) {
+                  target.dispatchEvent(
+                    new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true, composed: true }),
+                  );
+                }
                 await sleep(250);
                 if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
                   return true;
@@ -1022,6 +1186,7 @@ async function autoClickRewards() {
               } catch {}
             }
 
+            // elementFromPoint fallback
             const point = centerPoint(target);
             const topEl = document.elementFromPoint(point.clientX, point.clientY);
             if (
@@ -1055,8 +1220,12 @@ async function autoClickRewards() {
             .flat();
           const card = cards.find((a) => buildCardKey(a) === keyToClick);
 
-          if (!card) return false;
+          if (!card) {
+            console.log(`[Rewards] Card not found for key: ${keyToClick.substring(0, 80)}`);
+            return false;
+          }
 
+          console.log(`[Rewards] Found card to click, trying ${getClickableTargets(card).length} targets`);
           const targets = getClickableTargets(card);
           for (const target of targets) {
             if (await tryActivateTarget(card, target)) {
@@ -1116,7 +1285,7 @@ async function autoClickRewards() {
 
             const isQuizCompleted = () => {
               const text = getPageText();
-              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work|thank you for participating/i.test(text);
+              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work|thank you for participating|cảm ơn bạn|hoàn thành|谢谢|已完成|merci|danke|gracias|спасибо/i.test(text);
             };
 
             const clickElement = (el) => {
@@ -1261,7 +1430,7 @@ async function autoClickRewards() {
 
     try {
       await waitForTabComplete(tab.id);
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, /rewards\.bing\.com\/dashboard/i.test(url) ? 8000 : 2000));
 
       if (/rewards\.bing\.com\/dashboard/i.test(url)) {
         const claimResult = await claimReadyPoints(tab.id);
@@ -1381,9 +1550,15 @@ async function autoClickRewards() {
       for (let i = 0; i < maxCardClicks; i++) {
         if (timedOut()) {
           console.warn("[Rewards] Timeout budget reached while processing reward cards for " + url);
+          await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards", { url });
           break;
         }
         const rewardCards = await getRewardCards(tab.id);
+        await appendDebugLog("info", "rewards", `Found ${rewardCards.length} actionable card(s)`, {
+          url,
+          iteration: i + 1,
+          cards: rewardCards.map((c) => c.key.substring(0, 60)).join(" | "),
+        });
         const nextCard = rewardCards.find(
           (card) =>
             !successfulCardKeys.has(card.key) &&
@@ -1400,6 +1575,10 @@ async function autoClickRewards() {
         console.log(
           `[Rewards] Clicking reward card ${i + 1}: ${nextCard.href} (${nextCard.key}) attempt ${attemptNumber}`,
         );
+        await appendDebugLog("info", "rewards", `Clicking card ${i + 1}`, {
+          href: nextCard.href.substring(0, 80),
+          attempt: attemptNumber,
+        });
 
         const clicked = await clickRewardCard(tab.id, nextCard.key);
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
@@ -1449,6 +1628,12 @@ async function autoClickRewards() {
           `[Rewards] Reward card result ${completed ? "completed" : "not_completed"}: ` +
             `${nextCard.key} (clicked=${clicked}, childTabs=${newTabIds.length}, attempts=${attemptNumber})`,
         );
+        await appendDebugLog(completed ? "success" : "warn", "rewards", `Card ${completed ? "completed" : "not_completed"}`, {
+          href: nextCard.href.substring(0, 80),
+          clicked,
+          childTabs: newTabIds.length,
+          attempt: attemptNumber,
+        });
       }
     } finally {
       chrome.tabs.onCreated.removeListener(onCreated);
