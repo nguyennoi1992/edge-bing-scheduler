@@ -9,6 +9,34 @@ const REWARD_URL_TIMEOUT_MS = 150000;
 const DEBUG_LOGS_KEY = 'debugLogs';
 const DEBUG_LOG_RETENTION_DAYS = 7;
 const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+const KEEPALIVE_ALARM = "keepAlive";
+
+// Keep the MV3 service worker alive during active runs
+async function startKeepAlive() {
+  await chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.4 });
+  console.log("[KeepAlive] Started");
+}
+
+async function stopKeepAlive() {
+  await chrome.alarms.clear(KEEPALIVE_ALARM);
+  console.log("[KeepAlive] Stopped");
+}
+
+// Ensure a tab is focused and its window is in the foreground.
+// Prevents Edge from throttling background tabs or suspending extension scripts.
+async function ensureTabFocused(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab.active) {
+      await chrome.tabs.update(tabId, { active: true });
+    }
+    if (tab.windowId) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+  } catch (e) {
+    console.warn("[Focus] Failed to focus tab " + tabId + ":", e);
+  }
+}
 
 const DEFAULTS = {
   enabled: true,
@@ -1277,15 +1305,15 @@ async function autoClickRewards() {
               const title = (document.title || "").toLowerCase();
               const text = getPageText();
               return (
-                /(?:[?&]form=dsetqu|[?&]form=quiz|wqoskey=|bingqa_|quizlanding|poll)/i.test(url) ||
-                /\b(quiz|poll)\b/i.test(title) ||
-                /\b(quiz|poll)\b/i.test(text)
+                /(?:[?&]form=dsetqu|[?&]form=quiz|wqoskey=|bingqa_|quizlanding|poll|isconversation)/i.test(url) ||
+                /\b(quiz|poll|trivia)\b/i.test(title) ||
+                /\b(quiz|poll|trivia)\b/i.test(text)
               );
             };
 
             const isQuizCompleted = () => {
               const text = getPageText();
-              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work|thank you for participating|cảm ơn bạn|hoàn thành|谢谢|已完成|merci|danke|gracias|спасибо/i.test(text);
+              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work|thank you for participating|great job|well done|you got|your score|test complete|cảm ơn bạn|hoàn thành|làm tốt lắm|谢谢|已完成|merci|danke|gracias|спасибо/i.test(text);
             };
 
             const clickElement = (el) => {
@@ -1346,7 +1374,7 @@ async function autoClickRewards() {
             const buildCandidates = () => {
               return Array.from(
                 document.querySelectorAll(
-                  "button, [role='button'], a[href], input[type='button'], input[type='submit'], label",
+                  "button, [role='button'], a[href], input[type='button'], input[type='submit'], label, [data-tag], [class*='option'], [class*='Option'], [class*='answer'], [class*='Answer'], [class*='choice'], [class*='Choice']",
                 ),
               )
                 .filter((el) => el instanceof HTMLElement)
@@ -1355,19 +1383,28 @@ async function autoClickRewards() {
                   const text = getCandidateText(el);
                   let score = 0;
                   if (!text || text.length > 120) score -= 100;
-                  if (/(^sign in$|^feedback$|^privacy$|^terms$|^rewards$|^search$|^images$|^videos$|^maps$|^news$|^all$|^back$)/i.test(text)) {
+                  if (/(^sign in$|^feedback$|^privacy$|^terms$|^rewards$|^search$|^images$|^videos$|^maps$|^news$|^all$|^back$|^more$|^menu$|^settings$|^share$|^copy$|^chat$)/i.test(text)) {
                     score -= 100;
+                  }
+                  // Strongly penalize non-quiz navigation
+                  if (el.closest("nav, header, footer, [role='navigation'], [role='banner'], [role='contentinfo']")) {
+                    score -= 80;
                   }
                   if (el.matches("button, [role='button'], input[type='button'], input[type='submit']")) {
                     score += 40;
                   }
-                  if (el.closest("main, [role='main'], form, [class*='quiz'], [id*='quiz']")) {
+                  if (el.closest("main, [role='main'], form, [class*='quiz'], [id*='quiz'], [class*='Quiz']")) {
                     score += 20;
                   }
                   if (text.length > 0 && text.length <= 80) score += 10;
                   if (/answer|option|choice|true|false|yes|no/i.test(text)) score += 15;
-                  if (/start|play|begin|continue|next|submit|check answer|see results?/i.test(text)) score += 35;
-                  if (el.closest(".btOption, .wk_option, .geSlide, #rc-poll-container, .poll-container")) score += 30; // Strongly boost poll/quiz options
+                  if (/start|play|begin|continue|next|submit|check answer|see results?|take the quiz|let's go/i.test(text)) score += 35;
+                  if (el.closest(".btOption, .wk_option, .geSlide, #rc-poll-container, .poll-container")) score += 30;
+                  // Boost Bing conversational quiz elements
+                  if (el.matches("[data-tag], [class*='option'], [class*='Option']")) score += 25;
+                  if (el.closest("[class*='BingQA'], [class*='quiz-container'], [id*='quiz-container'], [class*='trivia']")) score += 30;
+                  // Boost numbered options (A., B., C., 1., 2., etc.)
+                  if (/^\s*[A-Da-d1-4][.)\s]/i.test(text)) score += 20;
                   return { el, text, score };
                 })
                 .filter((item) => item.score > 0)
@@ -1378,21 +1415,40 @@ async function autoClickRewards() {
               return { handled: false, completed: false, clicks: 0, reason: "not_quiz" };
             }
 
+            // Wait for quiz to fully initialize before starting
+            await sleep(3000);
+
             let clicks = 0;
-            for (let attempt = 0; attempt < 12; attempt++) {
+            let lastClickedText = "";
+            let sameClickCount = 0;
+            for (let attempt = 0; attempt < 25; attempt++) {
               if (isQuizCompleted()) {
                 return { handled: true, completed: true, clicks, reason: "completed" };
               }
 
               const candidates = buildCandidates();
               if (!candidates.length) {
-                await sleep(1200);
+                await sleep(1500);
                 continue;
               }
 
-              clickElement(candidates[0].el);
+              // Avoid clicking the same element repeatedly (stale-click detection)
+              let target = candidates[0];
+              if (target.text === lastClickedText) {
+                sameClickCount++;
+                if (sameClickCount >= 3) {
+                  // Try a different candidate if available
+                  target = candidates.length > 1 ? candidates[1] : candidates[0];
+                  sameClickCount = 0;
+                }
+              } else {
+                sameClickCount = 0;
+              }
+              lastClickedText = target.text;
+
+              clickElement(target.el);
               clicks++;
-              await sleep(1800);
+              await sleep(2500);
             }
 
             return {
@@ -1419,7 +1475,8 @@ async function autoClickRewards() {
     const baselineTabIds = new Set(
       tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)),
     );
-    const tab = await chrome.tabs.create({ url, active: false });
+    const tab = await chrome.tabs.create({ url, active: true });
+    await ensureTabFocused(tab.id);
     const spawnedTabIds = new Set();
     const onCreated = (createdTab) => {
       if (Number.isInteger(createdTab.id)) {
@@ -1430,6 +1487,7 @@ async function autoClickRewards() {
 
     try {
       await waitForTabComplete(tab.id);
+      await ensureTabFocused(tab.id);
       await new Promise((r) => setTimeout(r, /rewards\.bing\.com\/dashboard/i.test(url) ? 8000 : 2000));
 
       if (/rewards\.bing\.com\/dashboard/i.test(url)) {
@@ -1476,6 +1534,7 @@ async function autoClickRewards() {
           }
 
           await waitForTabComplete(tab.id);
+          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
 
           const attemptedActivityKeys = new Set();
@@ -1535,8 +1594,9 @@ async function autoClickRewards() {
             }
           }
 
-          await chrome.tabs.update(tab.id, { url, active: false });
+          await chrome.tabs.update(tab.id, { url, active: true });
           await waitForTabComplete(tab.id);
+          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
@@ -1594,6 +1654,7 @@ async function autoClickRewards() {
         for (const childTabId of newTabIds) {
           try {
             await waitForTabComplete(childTabId, 10000);
+            await ensureTabFocused(childTabId);
           } catch {}
 
           const childResult = await handleRewardChildTab(childTabId);
@@ -1614,6 +1675,7 @@ async function autoClickRewards() {
 
         await chrome.tabs.reload(tab.id);
         await waitForTabComplete(tab.id);
+        await ensureTabFocused(tab.id);
         await new Promise((r) => setTimeout(r, 2000));
 
         const refreshedCards = await getRewardCards(tab.id);
@@ -1742,12 +1804,12 @@ async function openBingAndType(query) {
       await chrome.tabs.get(tabId);
       await chrome.tabs.update(tabId, {
         url: "https://www.bing.com/",
-        active: false,
+        active: true,
       });
     } catch {
       const created = await chrome.tabs.create({
         url: "https://www.bing.com/",
-        active: false,
+        active: true,
       });
       tabId = created.id;
       singletonTabId = tabId;
@@ -1755,7 +1817,7 @@ async function openBingAndType(query) {
   } else {
     const created = await chrome.tabs.create({
       url: "https://www.bing.com/",
-      active: false,
+      active: true,
     });
     tabId = created.id;
     singletonTabId = tabId;
@@ -1763,6 +1825,7 @@ async function openBingAndType(query) {
 
   try {
     await waitForTabComplete(tabId);
+    await ensureTabFocused(tabId);
     await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
@@ -1771,7 +1834,7 @@ async function openBingAndType(query) {
     });
   } catch (e) {
     const url = "https://www.bing.com/search?q=" + encodeURIComponent(query);
-    await chrome.tabs.update(tabId, { url, active: false });
+    await chrome.tabs.update(tabId, { url, active: true });
   }
 }
 
@@ -1825,7 +1888,21 @@ async function runTask() {
   });
 
   const totalDelaySecs = perOpenDelays.reduce((a, b) => a + b, 0);
+  // Add an extra 2 seconds buffer after the last search before the final sweep
   setTimeout(async () => {
+    await appendDebugLog("success", "search", "Search phase completed", { totalQueries: queries.length });
+
+    // 3. Final sweep for rewards (second pass)
+    console.log("⚡ Running second pass for Bing Rewards auto click...");
+    await appendDebugLog("info", "rewards", "Second Rewards phase started");
+    try {
+      await autoClickRewards();
+      await appendDebugLog("success", "rewards", "Second Rewards phase completed");
+    } catch (e) {
+      console.warn("[Rewards] Second pass failed:", e);
+      await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
+    }
+
     await chrome.storage.sync.set({
       running: false,
       runEndsAt: null,
@@ -1833,8 +1910,7 @@ async function runTask() {
     });
     await updateBadge();
     await ensureRunTicker();
-    await appendDebugLog("success", "search", "Search phase completed", { totalQueries: queries.length });
-  }, totalDelaySecs * 1000);
+  }, (totalDelaySecs + 2) * 1000);
 }
 
 async function startRun(source = "unknown") {
@@ -1847,11 +1923,13 @@ async function startRun(source = "unknown") {
     try {
       console.log(`[Run] Started from ${source}`);
       await appendDebugLog("info", "run", "Run started", { source });
+      await startKeepAlive();
       await runTask();
     } catch (e) {
       console.error(`[Run] Failed from ${source}:`, e);
       await appendDebugLog("error", "run", "Run failed", { source, error: String(e) });
     } finally {
+      await stopKeepAlive();
       runPromise = null;
       console.log(`[Run] Finished from ${source}`);
       await appendDebugLog("info", "run", "Run finished", { source });
@@ -1879,6 +1957,10 @@ async function scheduleAlarm() {
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) {
+    // No-op ping to prevent MV3 service worker from being terminated
+    return;
+  }
   if (alarm.name === ALARM_NAME) {
     await startRun("alarm");
     await scheduleAlarm();
