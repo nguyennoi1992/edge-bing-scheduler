@@ -5,7 +5,7 @@ const ALARM_NAME = "bingScheduler";
 const BADGE_ALARM = "badgeTick";
 const REWARDS_SETTLE_MS = 8000;
 const REWARD_CHILD_SYNC_MS = 5000;
-const REWARD_URL_TIMEOUT_MS = 150000;
+const REWARD_URL_TIMEOUT_MS = 480000;
 const DEBUG_LOGS_KEY = 'debugLogs';
 const DEBUG_LOG_RETENTION_DAYS = 7;
 const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -1601,101 +1601,69 @@ async function autoClickRewards() {
         }
       }
 
-      const successfulCardKeys = new Set();
-      const cardAttemptCounts = new Map();
-      const processedRewardChildTabIds = new Set();
-      const maxCardClicks = 12;
-      const maxAttemptsPerCard = 2;
+      // Collect all reward cards once, click through each one, then move on.
+      // The second rewards pass after searches will handle any remaining cards.
+      const rewardCards = await getRewardCards(tab.id);
+      await appendDebugLog("info", "rewards", `Found ${rewardCards.length} reward card(s) to click`, {
+        url,
+        cards: rewardCards.map((c) => c.key.substring(0, 60)).join(" | "),
+      });
 
-      for (let i = 0; i < maxCardClicks; i++) {
+      for (let i = 0; i < rewardCards.length; i++) {
         if (timedOut()) {
-          console.warn("[Rewards] Timeout budget reached while processing reward cards for " + url);
-          await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards", { url });
-          break;
-        }
-        const rewardCards = await getRewardCards(tab.id);
-        await appendDebugLog("info", "rewards", `Found ${rewardCards.length} actionable card(s)`, {
-          url,
-          iteration: i + 1,
-          cards: rewardCards.map((c) => c.key.substring(0, 60)).join(" | "),
-        });
-        const nextCard = rewardCards.find(
-          (card) =>
-            !successfulCardKeys.has(card.key) &&
-            (cardAttemptCounts.get(card.key) || 0) < maxAttemptsPerCard,
-        );
-
-        if (!nextCard) {
-          console.log(`[Rewards] No more actionable cards found for ${url}`);
+          console.warn("[Rewards] Timeout budget reached while clicking reward cards for " + url);
+          await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards", { url, processed: i, total: rewardCards.length });
           break;
         }
 
-        const attemptNumber = (cardAttemptCounts.get(nextCard.key) || 0) + 1;
-        cardAttemptCounts.set(nextCard.key, attemptNumber);
-        console.log(
-          `[Rewards] Clicking reward card ${i + 1}: ${nextCard.href} (${nextCard.key}) attempt ${attemptNumber}`,
-        );
-        await appendDebugLog("info", "rewards", `Clicking card ${i + 1}`, {
-          href: nextCard.href.substring(0, 80),
-          attempt: attemptNumber,
+        const card = rewardCards[i];
+        console.log(`[Rewards] Clicking reward card ${i + 1}/${rewardCards.length}: ${card.href}`);
+        await appendDebugLog("info", "rewards", `Clicking card ${i + 1}/${rewardCards.length}`, {
+          href: card.href.substring(0, 80),
         });
 
-        const clicked = await clickRewardCard(tab.id, nextCard.key);
+        const clicked = await clickRewardCard(tab.id, card.key);
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
+        // Collect and briefly wait for any child tabs that were spawned
         const currentTabs = await chrome.tabs.query({});
         const newTabIds = currentTabs
           .map((t) => t.id)
           .filter((id) => Number.isInteger(id))
           .filter((id) => !baselineTabIds.has(id))
-          .filter((id) => id !== tab.id)
-          .filter((id) => !processedRewardChildTabIds.has(id));
+          .filter((id) => id !== tab.id);
 
         for (const childTabId of newTabIds) {
           try {
             await waitForTabComplete(childTabId, 10000);
-            await ensureTabFocused(childTabId);
           } catch {}
+        }
 
-          const childResult = await handleRewardChildTab(childTabId);
-          processedRewardChildTabIds.add(childTabId);
-          if (childResult.handled) {
-            console.log(
-              `[Rewards] Child tab ${childTabId} handled=${childResult.handled} completed=${childResult.completed} clicks=${childResult.clicks} reason=${childResult.reason}`,
-            );
+        // Brief sync wait then close child tabs
+        if (newTabIds.length) {
+          await new Promise((r) => setTimeout(r, REWARD_CHILD_SYNC_MS));
+          try {
+            await chrome.tabs.remove(newTabIds);
+            console.log(`[Rewards] Closed ${newTabIds.length} child tab(s) from card ${i + 1}`);
+          } catch (e) {
+            console.warn("[Rewards] Failed closing child tab(s):", e);
           }
         }
 
-        if (newTabIds.length) {
-          console.log(
-            `[Rewards] Keeping ${newTabIds.length} reward child tab(s) open for sync before final cleanup`,
-          );
-          await new Promise((r) => setTimeout(r, REWARD_CHILD_SYNC_MS));
-        }
-
-        await chrome.tabs.reload(tab.id);
-        await waitForTabComplete(tab.id);
-        await ensureTabFocused(tab.id);
-        await new Promise((r) => setTimeout(r, 2000));
-
-        const refreshedCards = await getRewardCards(tab.id);
-        const stillActionable = refreshedCards.some((card) => card.key === nextCard.key);
-        const completed = !stillActionable;
-
-        if (completed) {
-          successfulCardKeys.add(nextCard.key);
-        }
-
-        console.log(
-          `[Rewards] Reward card result ${completed ? "completed" : "not_completed"}: ` +
-            `${nextCard.key} (clicked=${clicked}, childTabs=${newTabIds.length}, attempts=${attemptNumber})`,
-        );
-        await appendDebugLog(completed ? "success" : "warn", "rewards", `Card ${completed ? "completed" : "not_completed"}`, {
-          href: nextCard.href.substring(0, 80),
+        console.log(`[Rewards] Card ${i + 1}/${rewardCards.length} done (clicked=${clicked}, childTabs=${newTabIds.length})`);
+        await appendDebugLog("info", "rewards", `Card ${i + 1} done`, {
+          href: card.href.substring(0, 80),
           clicked,
           childTabs: newTabIds.length,
-          attempt: attemptNumber,
         });
+
+        // Navigate back to rewards page for the next card
+        if (i < rewardCards.length - 1) {
+          await chrome.tabs.update(tab.id, { url, active: true });
+          await waitForTabComplete(tab.id);
+          await ensureTabFocused(tab.id);
+          await new Promise((r) => setTimeout(r, 2000));
+        }
       }
     } finally {
       chrome.tabs.onCreated.removeListener(onCreated);
@@ -1849,68 +1817,58 @@ async function runTask() {
 
   await appendDebugLog("info", "search", "Search phase started");
 
-  // 2. Then continue with Bing searches
+  // 2. Then continue with Bing searches — use awaited loop so the
+  //    service worker keepalive stays active until every search finishes.
   const queries = getQueryList(cfg);
-  const perOpenDelays = queries.map(() =>
-    randomDelay(cfg.intervalMin, cfg.intervalMax),
-  );
 
-  const start = Date.now();
-  let accumulatedSecs = 0;
-  accumulatedSecs += perOpenDelays[0] || 0;
-  const firstNextOpenAt = start + accumulatedSecs * 1000;
   await chrome.storage.sync.set({
     running: true,
     runEndsAt: null,
-    nextOpenAt: firstNextOpenAt,
+    nextOpenAt: Date.now(),
   });
   await updateBadge();
-
   await ensureRunTicker();
 
-  let cumulativeDelaySecs = 0;
-  queries.forEach((q, idx) => {
-    cumulativeDelaySecs += perOpenDelays[idx];
-    setTimeout(async () => {
-      await appendDebugLog("info", "search", "Search opened", { query: q, index: idx + 1, total: queries.length });
-      await openBingAndType(q);
+  for (let idx = 0; idx < queries.length; idx++) {
+    const delaySecs = randomDelay(cfg.intervalMin, cfg.intervalMax);
+    const nextOpenAt = Date.now() + delaySecs * 1000;
+    await chrome.storage.sync.set({ nextOpenAt });
+    await updateBadge();
 
-      if (idx + 1 < perOpenDelays.length) {
-        accumulatedSecs += perOpenDelays[idx + 1];
-        const nextOpenAt = start + accumulatedSecs * 1000;
-        await chrome.storage.sync.set({ nextOpenAt });
-      } else {
-        await chrome.storage.sync.set({ nextOpenAt: null });
-      }
+    // Wait for the random delay before opening the next search
+    await new Promise((r) => setTimeout(r, delaySecs * 1000));
 
-      await updateBadge();
-    }, cumulativeDelaySecs * 1000);
+    await appendDebugLog("info", "search", "Search opened", {
+      query: queries[idx],
+      index: idx + 1,
+      total: queries.length,
+    });
+    await openBingAndType(queries[idx]);
+  }
+
+  await chrome.storage.sync.set({ nextOpenAt: null });
+  await appendDebugLog("success", "search", "Search phase completed", {
+    totalQueries: queries.length,
   });
 
-  const totalDelaySecs = perOpenDelays.reduce((a, b) => a + b, 0);
-  // Add an extra 2 seconds buffer after the last search before the final sweep
-  setTimeout(async () => {
-    await appendDebugLog("success", "search", "Search phase completed", { totalQueries: queries.length });
+  // 3. Final sweep for rewards (second pass)
+  console.log("⚡ Running second pass for Bing Rewards auto click...");
+  await appendDebugLog("info", "rewards", "Second Rewards phase started");
+  try {
+    await autoClickRewards();
+    await appendDebugLog("success", "rewards", "Second Rewards phase completed");
+  } catch (e) {
+    console.warn("[Rewards] Second pass failed:", e);
+    await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
+  }
 
-    // 3. Final sweep for rewards (second pass)
-    console.log("⚡ Running second pass for Bing Rewards auto click...");
-    await appendDebugLog("info", "rewards", "Second Rewards phase started");
-    try {
-      await autoClickRewards();
-      await appendDebugLog("success", "rewards", "Second Rewards phase completed");
-    } catch (e) {
-      console.warn("[Rewards] Second pass failed:", e);
-      await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
-    }
-
-    await chrome.storage.sync.set({
-      running: false,
-      runEndsAt: null,
-      nextOpenAt: null,
-    });
-    await updateBadge();
-    await ensureRunTicker();
-  }, (totalDelaySecs + 2) * 1000);
+  await chrome.storage.sync.set({
+    running: false,
+    runEndsAt: null,
+    nextOpenAt: null,
+  });
+  await updateBadge();
+  await ensureRunTicker();
 }
 
 async function startRun(source = "unknown") {
