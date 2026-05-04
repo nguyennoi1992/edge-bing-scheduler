@@ -162,7 +162,7 @@ function getQueryList(cfg) {
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
   await appendDebugLog("info", "rewards", "Rewards phase started");
-  const rewardSectionIds = ["moreactivities", "dailyset", "exploreonbing"];
+  const rewardSectionIds = ["moreactivities", "microsoft", "streaks", "levelup"];
   const rewardUrls = [
     "https://rewards.bing.com/earn",
     "https://rewards.bing.com/dashboard",
@@ -472,6 +472,10 @@ async function autoClickRewards() {
             if (seen.has(href)) continue;
             seen.add(href);
 
+            // Skip completed quests (statusSuccess badge with checkmark SVG)
+            const successBadge = link.querySelector("[class*='statusSuccess']");
+            if (successBadge && successBadge.querySelector("svg")) continue;
+
             const linkText = normalizeText(link.innerText || link.textContent || "");
             items.push({
               href,
@@ -576,31 +580,37 @@ async function autoClickRewards() {
 
           const actionables = Array.from(
             activitiesRoot.querySelectorAll(
-              "a[href], button, [role='button'], [role='link'][href]",
+              "a[href], button, [role='button'], [role='link']",
             ),
           )
             .filter((el) => isVisible(el))
             .filter((el) => {
               const label = normalizeText(
-                el.innerText || el.textContent || el.getAttribute("aria-label") || "",
+                el.innerText || el.textContent || "",
               );
-              if (!label) return false;
+              const ariaLabel = normalizeText(el.getAttribute("aria-label") || "");
+              if (!label && !ariaLabel) return false;
               if (/^activities$/i.test(label)) return false;
               if (/^status:/i.test(label) || /^expires:/i.test(label)) return false;
               if (el.getAttribute("aria-disabled") === "true") return false;
               if (el.closest("[aria-disabled='true'], [data-disabled='true']")) {
                 return false;
               }
-              return /click to complete|see |view |plan /i.test(label);
+              // Check both innerText and aria-label for action patterns
+              return /click to complete|see |view |plan /i.test(label) ||
+                     /click to complete/i.test(ariaLabel);
             });
 
           const seen = new Set();
           const items = [];
           for (const el of actionables) {
             const href = el.getAttribute("href") || "";
-            const label = normalizeText(
-              el.innerText || el.textContent || el.getAttribute("aria-label") || "",
+            const innerLabel = normalizeText(
+              el.innerText || el.textContent || "",
             );
+            const ariaLabel = normalizeText(el.getAttribute("aria-label") || "");
+            // Prefer aria-label for key since it contains the full action description
+            const label = ariaLabel || innerLabel;
             const key = href + "|" + label.toLowerCase();
             if (seen.has(key)) continue;
             seen.add(key);
@@ -648,7 +658,7 @@ async function autoClickRewards() {
 
           const el = Array.from(
             activitiesRoot.querySelectorAll(
-              "a[href], button, [role='button'], [role='link'][href]",
+              "a[href], button, [role='button'], [role='link']",
             ),
           ).find((candidate) => {
             if (!isVisible(candidate)) return false;
@@ -657,12 +667,12 @@ async function autoClickRewards() {
               return false;
             }
             const href = candidate.getAttribute("href") || "";
-            const label = normalizeText(
-              candidate.innerText ||
-                candidate.textContent ||
-                candidate.getAttribute("aria-label") ||
-                "",
+            const innerLabel = normalizeText(
+              candidate.innerText || candidate.textContent || "",
             );
+            const ariaLabel = normalizeText(candidate.getAttribute("aria-label") || "");
+            // Match using aria-label (preferred) or innerText, same as getQuestActivities
+            const label = ariaLabel || innerLabel;
             return href + "|" + label.toLowerCase() === keyToClick;
           });
 
