@@ -22,21 +22,7 @@ async function stopKeepAlive() {
   console.log("[KeepAlive] Stopped");
 }
 
-// Ensure a tab is focused and its window is in the foreground.
-// Prevents Edge from throttling background tabs or suspending extension scripts.
-async function ensureTabFocused(tabId) {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab.active) {
-      await chrome.tabs.update(tabId, { active: true });
-    }
-    if (tab.windowId) {
-      await chrome.windows.update(tab.windowId, { focused: true });
-    }
-  } catch (e) {
-    console.warn("[Focus] Failed to focus tab " + tabId + ":", e);
-  }
-}
+
 
 const DEFAULTS = {
   enabled: true,
@@ -1493,8 +1479,7 @@ async function autoClickRewards() {
     const baselineTabIds = new Set(
       tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)),
     );
-    const tab = await chrome.tabs.create({ url, active: true });
-    await ensureTabFocused(tab.id);
+    const tab = await chrome.tabs.create({ url, active: false });
     const spawnedTabIds = new Set();
     const onCreated = (createdTab) => {
       if (Number.isInteger(createdTab.id)) {
@@ -1505,7 +1490,6 @@ async function autoClickRewards() {
 
     try {
       await waitForTabComplete(tab.id);
-      await ensureTabFocused(tab.id);
       await new Promise((r) => setTimeout(r, /rewards\.bing\.com\/dashboard/i.test(url) ? 8000 : 2000));
 
       if (/rewards\.bing\.com\/dashboard/i.test(url)) {
@@ -1552,7 +1536,6 @@ async function autoClickRewards() {
           }
 
           await waitForTabComplete(tab.id);
-          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
 
           const attemptedActivityKeys = new Set();
@@ -1612,9 +1595,8 @@ async function autoClickRewards() {
             }
           }
 
-          await chrome.tabs.update(tab.id, { url, active: true });
+          await chrome.tabs.update(tab.id, { url, active: false });
           await waitForTabComplete(tab.id);
-          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
@@ -1677,9 +1659,8 @@ async function autoClickRewards() {
 
         // Navigate back to rewards page for the next card
         if (i < rewardCards.length - 1) {
-          await chrome.tabs.update(tab.id, { url, active: true });
+          await chrome.tabs.update(tab.id, { url, active: false });
           await waitForTabComplete(tab.id);
-          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
@@ -1790,12 +1771,12 @@ async function openBingAndType(query) {
       await chrome.tabs.get(tabId);
       await chrome.tabs.update(tabId, {
         url: "https://www.bing.com/",
-        active: true,
+        active: false,
       });
     } catch {
       const created = await chrome.tabs.create({
         url: "https://www.bing.com/",
-        active: true,
+        active: false,
       });
       tabId = created.id;
       singletonTabId = tabId;
@@ -1803,7 +1784,7 @@ async function openBingAndType(query) {
   } else {
     const created = await chrome.tabs.create({
       url: "https://www.bing.com/",
-      active: true,
+      active: false,
     });
     tabId = created.id;
     singletonTabId = tabId;
@@ -1811,7 +1792,6 @@ async function openBingAndType(query) {
 
   try {
     await waitForTabComplete(tabId);
-    await ensureTabFocused(tabId);
     await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
@@ -1820,7 +1800,7 @@ async function openBingAndType(query) {
     });
   } catch (e) {
     const url = "https://www.bing.com/search?q=" + encodeURIComponent(query);
-    await chrome.tabs.update(tabId, { url, active: true });
+    await chrome.tabs.update(tabId, { url, active: false });
   }
 }
 
