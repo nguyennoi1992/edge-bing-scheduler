@@ -162,7 +162,7 @@ function getQueryList(cfg) {
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
   await appendDebugLog("info", "rewards", "Rewards phase started");
-  const rewardSectionIds = ["moreactivities", "microsoft", "streaks", "levelup"];
+  const rewardSectionIds = ["moreactivities", "microsoft", "streaks", "levelup", "global"];
   const rewardUrls = [
     "https://rewards.bing.com/earn",
     "https://rewards.bing.com/dashboard",
@@ -458,28 +458,31 @@ async function autoClickRewards() {
             );
           };
 
-          const questSection = document.querySelector("#quests");
-          if (!questSection) return [];
-
-          const links = Array.from(questSection.querySelectorAll("a[href]"));
+          const questNodes = Array.from(
+            document.querySelectorAll("#quests a[href], button.rounded-cornerCardDefault, a.rounded-cornerCardDefault")
+          );
           const seen = new Set();
           const items = [];
 
-          for (const link of links) {
-            if (!isVisible(link)) continue;
-            const href = link.getAttribute("href") || "";
-            if (!href || !/\/earn\/quest\//i.test(href)) continue;
-            if (seen.has(href)) continue;
-            seen.add(href);
+          for (const node of questNodes) {
+            if (!isVisible(node)) continue;
+            
+            const href = node.getAttribute("href") || "";
+            if (node.tagName.toLowerCase() === "a" && (!href || !/\/earn\/quest\//i.test(href))) {
+              if (node.closest("#quests")) continue;
+            }
 
-            // Skip completed quests (statusSuccess badge with checkmark SVG)
-            const successBadge = link.querySelector("[class*='statusSuccess']");
-            if (successBadge && successBadge.querySelector("svg")) continue;
+            const linkText = normalizeText(node.innerText || node.textContent || "");
+            if (!linkText) continue;
 
-            const linkText = normalizeText(link.innerText || link.textContent || "");
+            const key = (href || "btn") + "|" + linkText.toLowerCase();
+
+            if (seen.has(key)) continue;
+            seen.add(key);
+
             items.push({
-              href,
-              key: href + "|" + linkText.toLowerCase(),
+              href: key,
+              key: key,
             });
           }
 
@@ -511,12 +514,17 @@ async function autoClickRewards() {
             );
           };
 
-          const questSection = document.querySelector("#quests");
-          if (!questSection) return false;
-
-          const card = Array.from(questSection.querySelectorAll("a[href]")).find(
-            (el) => isVisible(el) && (el.getAttribute("href") || "") === hrefToClick,
+          const questNodes = Array.from(
+            document.querySelectorAll("#quests a[href], button.rounded-cornerCardDefault, a.rounded-cornerCardDefault")
           );
+
+          const card = questNodes.find((el) => {
+            if (!isVisible(el)) return false;
+            const href = el.getAttribute("href") || "";
+            const linkText = normalizeText(el.innerText || el.textContent || "");
+            const key = (href || "btn") + "|" + linkText.toLowerCase();
+            return key === hrefToClick;
+          });
 
           if (!card) return false;
 
@@ -778,32 +786,33 @@ async function autoClickRewards() {
             }
 
             function collectSectionCardsById(sectionId) {
-              const section = document.querySelector(`#${sectionId}`);
-              if (!section) return [];
-              expandSectionIfCollapsed(section);
+              let section = null;
+              if (sectionId !== "global") {
+                section = document.querySelector(`#${sectionId}`);
+                if (!section) return [];
+                expandSectionIfCollapsed(section);
+              }
+              const rootNode = section || document;
 
-              // Broad search: find all <a> inside grids first, then fallback to all <a>
+              // Accumulate all <a> inside all possible grids
               const gridSelectors = [
-                "div.grid.gap-3.lg\\:grid-cols-2.xl\\:grid-cols-3",
-                "div.grid.gap-3.lg\\:grid-cols-2.\\32 xl\\:grid-cols-3",
-                "div[class*='grid'][class*='gap']",
-                "div.grid.gap-3",
+                "div.grid.gap-3.lg\\:grid-cols-2.xl\\:grid-cols-3 > a[href]",
+                "div.grid.gap-3.lg\\:grid-cols-2.\\32 xl\\:grid-cols-3 > a[href]",
+                "div[class*='grid'][class*='gap'] > a[href]",
+                "div.grid.gap-3 > a[href]",
+                ".react-aria-DisclosurePanel a[href]",
+                "[role='group'] a[href]"
               ];
               let gridAnchors = [];
+              const seenAnchors = new Set();
               for (const selector of gridSelectors) {
-                gridAnchors = Array.from(
-                  section.querySelectorAll(`${selector} > a[href]`)
-                );
-                if (gridAnchors.length) break;
-              }
-              // Fallback: all anchor children within the disclosure panel
-              if (!gridAnchors.length) {
-                const panel = section.querySelector(
-                  ".react-aria-DisclosurePanel, [role='group']"
-                );
-                gridAnchors = Array.from(
-                  (panel || section).querySelectorAll("a[href]")
-                );
+                const anchors = Array.from(rootNode.querySelectorAll(selector));
+                for (const a of anchors) {
+                  if (!seenAnchors.has(a)) {
+                    seenAnchors.add(a);
+                    gridAnchors.push(a);
+                  }
+                }
               }
 
               const unique = [];
@@ -830,9 +839,6 @@ async function autoClickRewards() {
 
                 const text = normalizeText(a.innerText || a.textContent || "").toLowerCase();
                 if (text.includes("see more tasks") || text.includes("earn more")) continue;
-
-                // Check completed status using robust badge/status checks
-                if (isCardCompleted(a)) continue;
 
                 const key = `${href}|${text}`;
                 if (seen.has(key)) continue;
@@ -990,30 +996,32 @@ async function autoClickRewards() {
           }
 
           function collectSectionCardsById(sectionId) {
-            const section = document.querySelector(`#${sectionId}`);
-            if (!section) return [];
-            expandSectionIfCollapsed(section);
+            let section = null;
+            if (sectionId !== "global") {
+              section = document.querySelector(`#${sectionId}`);
+              if (!section) return [];
+              expandSectionIfCollapsed(section);
+            }
+            const rootNode = section || document;
 
             const gridSelectors = [
-              "div.grid.gap-3.lg\\:grid-cols-2.xl\\:grid-cols-3",
-              "div.grid.gap-3.lg\\:grid-cols-2.\\32 xl\\:grid-cols-3",
-              "div[class*='grid'][class*='gap']",
-              "div.grid.gap-3",
+              "div.grid.gap-3.lg\\:grid-cols-2.xl\\:grid-cols-3 > a[href]",
+              "div.grid.gap-3.lg\\:grid-cols-2.\\32 xl\\:grid-cols-3 > a[href]",
+              "div[class*='grid'][class*='gap'] > a[href]",
+              "div.grid.gap-3 > a[href]",
+              ".react-aria-DisclosurePanel a[href]",
+              "[role='group'] a[href]"
             ];
             let gridAnchors = [];
+            const seenAnchors = new Set();
             for (const selector of gridSelectors) {
-              gridAnchors = Array.from(
-                section.querySelectorAll(`${selector} > a[href]`)
-              );
-              if (gridAnchors.length) break;
-            }
-            if (!gridAnchors.length) {
-              const panel = section.querySelector(
-                ".react-aria-DisclosurePanel, [role='group']"
-              );
-              gridAnchors = Array.from(
-                (panel || section).querySelectorAll("a[href]")
-              );
+              const anchors = Array.from(rootNode.querySelectorAll(selector));
+              for (const a of anchors) {
+                if (!seenAnchors.has(a)) {
+                  seenAnchors.add(a);
+                  gridAnchors.push(a);
+                }
+              }
             }
 
             return gridAnchors
@@ -1024,7 +1032,7 @@ async function autoClickRewards() {
                 if (!href || href === "/earn") return false;
                 const text = normalizeText(a.innerText || a.textContent || "").toLowerCase();
                 if (text.includes("see more tasks") || text.includes("earn more")) return false;
-                return !isCardCompleted(a);
+                return true;
               });
           }
 
