@@ -72,6 +72,7 @@ async function clearDebugLogs() {
 
 let runTicker = null;
 let singletonTabId = null;
+let singletonWindowId = null;
 let runPromise = null;
 
 // ---------------- Badge helpers ----------------
@@ -338,9 +339,10 @@ async function autoClickRewards() {
     return claimResult;
   }
 
-  async function closeChildTabs(parentTabId, rounds = 4, delayMs = 1200) {
+  async function closeChildTabs(parentTabId, rounds = 4, delayMs = 1200, windowId = undefined) {
     for (let i = 0; i < rounds; i++) {
-      const allTabs = await chrome.tabs.query({});
+      const queryOpts = windowId ? { windowId } : {};
+      const allTabs = await chrome.tabs.query(queryOpts);
       const openerMap = new Map();
       for (const t of allTabs) {
         if (Number.isInteger(t.id)) {
@@ -388,6 +390,7 @@ async function autoClickRewards() {
     excludeTabIds = [],
     rounds = 4,
     delayMs = 1200,
+    windowId = undefined,
   ) {
     const rewardLikeUrl =
       /(rewards\.bing\.com|bing\.com|msn\.com|microsoft\.com\/rewards)/i;
@@ -396,7 +399,8 @@ async function autoClickRewards() {
     );
 
     for (let i = 0; i < rounds; i++) {
-      const allTabs = await chrome.tabs.query({});
+      const queryOpts = windowId ? { windowId } : {};
+      const allTabs = await chrome.tabs.query(queryOpts);
       const candidateIds = allTabs
         .filter((t) => Number.isInteger(t.id))
         .filter((t) => !baselineTabIds.has(t.id))
@@ -418,6 +422,105 @@ async function autoClickRewards() {
       if (i < rounds - 1) {
         await new Promise((r) => setTimeout(r, delayMs));
       }
+    }
+  }
+
+  /**
+   * Inject human-like scroll behaviour into a child tab so Bing registers the visit.
+   * Scrolls down in random increments with random pauses, then scrolls back up partially.
+   * Total duration is randomised between ~4-8 seconds.
+   */
+  async function humanScrollOnTab(tabId, timeoutMs = 15000) {
+    try {
+      // Make sure the tab is ready
+      await waitForTabComplete(tabId, timeoutMs);
+      await new Promise((r) => setTimeout(r, 1500));
+
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: async () => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+          // Random integer between min and max (inclusive)
+          const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+          const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 900;
+          const pageHeight = Math.max(
+            document.body.scrollHeight || 0,
+            document.documentElement.scrollHeight || 0,
+            viewportHeight
+          );
+          const maxScroll = Math.max(0, pageHeight - viewportHeight);
+
+          if (maxScroll <= 50) {
+            // Page is too short to scroll, just wait a bit to simulate reading
+            await sleep(rand(2000, 4000));
+            return;
+          }
+
+          let currentY = window.scrollY || 0;
+
+          // Phase 1: Scroll down in 3–6 random steps
+          const downSteps = rand(3, 6);
+          for (let i = 0; i < downSteps; i++) {
+            const scrollAmount = rand(
+              Math.floor(viewportHeight * 0.3),
+              Math.floor(viewportHeight * 0.85)
+            );
+            const targetY = Math.min(currentY + scrollAmount, maxScroll);
+
+            window.scrollTo({ top: targetY, behavior: "smooth" });
+            currentY = targetY;
+
+            // Random reading pause between scrolls (400ms – 1800ms)
+            await sleep(rand(400, 1800));
+
+            if (currentY >= maxScroll) break;
+          }
+
+          // Phase 2: Brief pause at the bottom (simulate reading)
+          await sleep(rand(800, 2000));
+
+          // Phase 3: Scroll back up partially (1–3 steps) — humans don't always scroll all the way back
+          const upSteps = rand(1, 3);
+          for (let i = 0; i < upSteps; i++) {
+            const scrollAmount = rand(
+              Math.floor(viewportHeight * 0.2),
+              Math.floor(viewportHeight * 0.6)
+            );
+            const targetY = Math.max(currentY - scrollAmount, 0);
+
+            window.scrollTo({ top: targetY, behavior: "smooth" });
+            currentY = targetY;
+
+            await sleep(rand(300, 1200));
+
+            if (currentY <= 0) break;
+          }
+
+          // Phase 4: Small random mouse-move events to look human
+          for (let i = 0; i < rand(2, 5); i++) {
+            try {
+              document.dispatchEvent(
+                new MouseEvent("mousemove", {
+                  clientX: rand(100, window.innerWidth - 100),
+                  clientY: rand(100, window.innerHeight - 100),
+                  bubbles: true,
+                })
+              );
+            } catch {}
+            await sleep(rand(200, 600));
+          }
+
+          // Final brief pause
+          await sleep(rand(500, 1500));
+        },
+      });
+
+      console.log(`[Rewards] Human scroll completed on tab ${tabId}`);
+    } catch (e) {
+      console.warn(`[Rewards] Human scroll failed on tab ${tabId}:`, e?.message || e);
     }
   }
 
@@ -1475,14 +1578,21 @@ async function autoClickRewards() {
 
     console.log("[Rewards] Processing " + url);
     await appendDebugLog("info", "rewards", "Processing reward URL", { url });
-    const tabsBefore = await chrome.tabs.query({});
+
+    // Pin all tab operations to the same window to avoid jumping to another window
+    const currentWindow = await chrome.windows.getCurrent();
+    const windowId = currentWindow.id;
+    console.log(`[Rewards] Pinned to window ${windowId}`);
+
+    const tabsBefore = await chrome.tabs.query({ windowId });
     const baselineTabIds = new Set(
       tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)),
     );
-    const tab = await chrome.tabs.create({ url, active: false });
+    const tab = await chrome.tabs.create({ url, active: false, windowId });
     const spawnedTabIds = new Set();
     const onCreated = (createdTab) => {
-      if (Number.isInteger(createdTab.id)) {
+      // Only track tabs spawned in our window
+      if (Number.isInteger(createdTab.id) && createdTab.windowId === windowId) {
         spawnedTabIds.add(createdTab.id);
       }
     };
@@ -1570,16 +1680,17 @@ async function autoClickRewards() {
             await clickQuestActivity(tab.id, nextActivity.key);
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
-            const currentTabs = await chrome.tabs.query({});
+            const currentTabs = await chrome.tabs.query({ windowId });
             const newTabIds = currentTabs
               .map((t) => t.id)
               .filter((id) => Number.isInteger(id))
               .filter((id) => !baselineTabIds.has(id))
               .filter((id) => id !== tab.id);
 
+            // Scroll like a human on each child tab before closing
             for (const childTabId of newTabIds) {
               try {
-                await waitForTabComplete(childTabId, 10000);
+                await humanScrollOnTab(childTabId);
               } catch {}
             }
 
@@ -1625,23 +1736,23 @@ async function autoClickRewards() {
         const clicked = await clickRewardCard(tab.id, card.key);
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
-        // Collect and briefly wait for any child tabs that were spawned
-        const currentTabs = await chrome.tabs.query({});
+        // Collect and scroll child tabs that were spawned before closing
+        const currentTabs = await chrome.tabs.query({ windowId });
         const newTabIds = currentTabs
           .map((t) => t.id)
           .filter((id) => Number.isInteger(id))
           .filter((id) => !baselineTabIds.has(id))
           .filter((id) => id !== tab.id);
 
+        // Scroll like a human on each child tab so Bing registers the visit
         for (const childTabId of newTabIds) {
           try {
-            await waitForTabComplete(childTabId, 10000);
+            await humanScrollOnTab(childTabId);
           } catch {}
         }
 
-        // Brief sync wait then close child tabs
+        // Close child tabs after scrolling
         if (newTabIds.length) {
-          await new Promise((r) => setTimeout(r, REWARD_CHILD_SYNC_MS));
           try {
             await chrome.tabs.remove(newTabIds);
             console.log(`[Rewards] Closed ${newTabIds.length} child tab(s) from card ${i + 1}`);
@@ -1683,8 +1794,8 @@ async function autoClickRewards() {
             );
           }
         }
-        await closeChildTabs(tab.id);
-        await closeNewRewardTabs(baselineTabIds, [tab.id]);
+        await closeChildTabs(tab.id, 4, 1200, windowId);
+        await closeNewRewardTabs(baselineTabIds, [tab.id], 4, 1200, windowId);
         try {
           await chrome.tabs.remove(tab.id);
           console.log(`[Rewards] Closed tab for ${url}`);
@@ -1765,6 +1876,12 @@ function waitForTabComplete(tabId, timeoutMs = 15000) {
 }
 
 async function openBingAndType(query) {
+  // Resolve windowId once and reuse across the search session
+  if (!singletonWindowId) {
+    const currentWindow = await chrome.windows.getCurrent();
+    singletonWindowId = currentWindow.id;
+  }
+
   let tabId = singletonTabId;
   if (tabId) {
     try {
@@ -1777,6 +1894,7 @@ async function openBingAndType(query) {
       const created = await chrome.tabs.create({
         url: "https://www.bing.com/",
         active: false,
+        windowId: singletonWindowId,
       });
       tabId = created.id;
       singletonTabId = tabId;
@@ -1785,6 +1903,7 @@ async function openBingAndType(query) {
     const created = await chrome.tabs.create({
       url: "https://www.bing.com/",
       active: false,
+      windowId: singletonWindowId,
     });
     tabId = created.id;
     singletonTabId = tabId;
@@ -1865,6 +1984,8 @@ async function runTask() {
     runEndsAt: null,
     nextOpenAt: null,
   });
+  // Reset window pinning for next run
+  singletonWindowId = null;
   await updateBadge();
   await ensureRunTicker();
 }
