@@ -1732,8 +1732,14 @@ async function autoClickRewards() {
     }
   }
   async function processRewardUrl(url) {
-    const deadlineAt = Date.now() + REWARD_URL_TIMEOUT_MS;
-    const timedOut = () => Date.now() >= deadlineAt;
+    let deadlineAt = Date.now() + REWARD_URL_TIMEOUT_MS;
+    const timedOut = () => {
+      if (Date.now() >= deadlineAt) {
+        deadlineAt = Date.now() + REWARD_URL_TIMEOUT_MS; // reset so we don't spam
+        return true;
+      }
+      return false;
+    };
 
     console.log("[Rewards] Processing " + url);
     await appendDebugLog("info", "rewards", "Processing reward URL", { url });
@@ -1787,7 +1793,7 @@ async function autoClickRewards() {
         for (let i = 0; i < maxQuestCards; i++) {
           if (timedOut()) {
             console.warn("[Rewards] Timeout budget reached while processing quest cards for " + url);
-            break;
+            await appendDebugLog("warn", "rewards", "Timeout budget reached for quest cards, continuing...", { url });
           }
           const questCards = await getQuestCards(tab.id);
           const nextQuest = questCards.find((card) => !attemptedQuestKeys.has(card.key));
@@ -1816,7 +1822,7 @@ async function autoClickRewards() {
           for (let j = 0; j < maxQuestActivities; j++) {
             if (timedOut()) {
               console.warn("[Rewards] Timeout budget reached while processing quest activities for " + url);
-              break;
+              await appendDebugLog("warn", "rewards", "Timeout budget reached for quest activities, continuing...", { url });
             }
             const questActivities = await getQuestActivities(tab.id);
             const nextActivity = questActivities.find(
@@ -1905,8 +1911,7 @@ async function autoClickRewards() {
       for (let i = 0; i < rewardCards.length; i++) {
         if (timedOut()) {
           console.warn("[Rewards] Timeout budget reached while clicking reward cards for " + url);
-          await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards", { url, processed: i, total: rewardCards.length });
-          break;
+          await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards, continuing...", { url, processed: i, total: rewardCards.length });
         }
 
         const card = rewardCards[i];
