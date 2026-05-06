@@ -22,7 +22,21 @@ async function stopKeepAlive() {
   console.log("[KeepAlive] Stopped");
 }
 
-
+// Ensure a tab is focused and its window is in the foreground.
+// Prevents Edge from throttling background tabs or suspending extension scripts.
+async function ensureTabFocused(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab.active) {
+      await chrome.tabs.update(tabId, { active: true });
+    }
+    if (tab.windowId) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+  } catch (e) {
+    console.warn("[Focus] Failed to focus tab " + tabId + ":", e);
+  }
+}
 
 const DEFAULTS = {
   enabled: true,
@@ -588,7 +602,11 @@ async function autoClickRewards() {
         target: { tabId },
         world: "MAIN",
         args: [targetHref],
-        func: (hrefToClick) => {
+        func: async (hrefToClick) => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const normalizeText = (value) =>
+            (value || "").replace(/\s+/g, " ").trim();
+
           const isVisible = (el) => {
             if (!el || typeof el.getBoundingClientRect !== "function") {
               return false;
@@ -603,17 +621,23 @@ async function autoClickRewards() {
             );
           };
 
-          const questNodes = Array.from(
-            document.querySelectorAll("#quests a[href], button.rounded-cornerCardDefault, a.rounded-cornerCardDefault")
-          );
+          let card = null;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            const questNodes = Array.from(
+              document.querySelectorAll("#quests a[href], button.rounded-cornerCardDefault, a.rounded-cornerCardDefault")
+            );
 
-          const card = questNodes.find((el) => {
-            if (!isVisible(el)) return false;
-            const href = el.getAttribute("href") || "";
-            const linkText = normalizeText(el.innerText || el.textContent || "");
-            const key = (href || "btn") + "|" + linkText.toLowerCase();
-            return key === hrefToClick;
-          });
+            card = questNodes.find((el) => {
+              if (!isVisible(el)) return false;
+              const href = el.getAttribute("href") || "";
+              const linkText = normalizeText(el.innerText || el.textContent || "");
+              const key = (href || "btn") + "|" + linkText.toLowerCase();
+              return key === hrefToClick;
+            });
+
+            if (card) break;
+            await sleep(800);
+          }
 
           if (!card) return false;
 
@@ -667,12 +691,18 @@ async function autoClickRewards() {
             );
           };
 
-          const activitiesHeading = Array.from(document.querySelectorAll("h2")).find(
-            (el) => normalizeText(el.textContent).toLowerCase() === "activities",
+          let activitiesRoot = null;
+          const activitiesHeading = Array.from(document.querySelectorAll("h2, h3, h4")).find(
+            (el) => isVisible(el) && /activities|hoạt động|tareas|activités|aufgaben/i.test(normalizeText(el.textContent)),
           );
-          const activitiesRoot =
-            activitiesHeading?.closest("div.overflow-hidden") ||
-            activitiesHeading?.parentElement?.parentElement?.parentElement;
+          if (activitiesHeading) {
+            activitiesRoot =
+              activitiesHeading.closest("div.overflow-hidden, section, [role='region'], .content-container") ||
+              activitiesHeading.parentElement?.parentElement?.parentElement;
+          }
+          if (!activitiesRoot) {
+            activitiesRoot = document.querySelector("#quests-details, dialog, [role='dialog'], .action-pane");
+          }
           if (!activitiesRoot) return [];
 
           const actionables = Array.from(
@@ -682,20 +712,30 @@ async function autoClickRewards() {
           )
             .filter((el) => isVisible(el))
             .filter((el) => {
-              const label = normalizeText(
-                el.innerText || el.textContent || "",
-              );
+              if (el.closest("nav, header, [role='banner']")) return false;
+              if (el.classList.contains("rounded-cornerCardDefault")) return false;
+              
+              const innerLabel = normalizeText(el.innerText || el.textContent || "");
               const ariaLabel = normalizeText(el.getAttribute("aria-label") || "");
-              if (!label && !ariaLabel) return false;
-              if (/^activities$/i.test(label)) return false;
-              if (/^status:/i.test(label) || /^expires:/i.test(label)) return false;
+              const label = (ariaLabel + " " + innerLabel).trim().toLowerCase();
+              
+              if (!label) return false;
+              if (/^(activities|hoạt động|tareas|activités|aufgaben)$/i.test(label)) return false;
+              if (/^(status:|expires:|trạng thái:|hết hạn:)/i.test(label)) return false;
+              if (/^(feedback|privacy|terms|microsoft|bing|search)$/i.test(label)) return false;
               if (el.getAttribute("aria-disabled") === "true") return false;
-              if (el.closest("[aria-disabled='true'], [data-disabled='true']")) {
-                return false;
-              }
-              // Check both innerText and aria-label for action patterns
-              return /click to complete|see |view |plan /i.test(label) ||
-                     /click to complete/i.test(ariaLabel);
+              if (el.closest("[aria-disabled='true'], [data-disabled='true']")) return false;
+              
+              if (/^(back|close|quay lại|đóng|zurück|schließen|retour|fermer|volver|cerrar)$/i.test(innerLabel)) return false;
+              
+              // Skip if it's a completed quest activity (checked green circle)
+              // Completed items usually have a specific status icon or aria-label
+              const isCompleted = el.closest("[class*='completed'], [class*='Success']") || 
+                                  el.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
+                                  /completed|done|hoàn thành|đã xong/i.test(label);
+              if (isCompleted) return false;
+
+              return true;
             });
 
           const seen = new Set();
@@ -727,7 +767,8 @@ async function autoClickRewards() {
         target: { tabId },
         world: "MAIN",
         args: [targetKey],
-        func: (keyToClick) => {
+        func: async (keyToClick) => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
           const normalizeText = (value) =>
             (value || "").replace(/\s+/g, " ").trim();
 
@@ -745,57 +786,170 @@ async function autoClickRewards() {
             );
           };
 
-          const activitiesHeading = Array.from(document.querySelectorAll("h2")).find(
-            (el) => normalizeText(el.textContent).toLowerCase() === "activities",
-          );
-          const activitiesRoot =
-            activitiesHeading?.closest("div.overflow-hidden") ||
-            activitiesHeading?.parentElement?.parentElement?.parentElement;
-          if (!activitiesRoot) return false;
-
-          const el = Array.from(
-            activitiesRoot.querySelectorAll(
-              "a[href], button, [role='button'], [role='link']",
-            ),
-          ).find((candidate) => {
-            if (!isVisible(candidate)) return false;
-            if (candidate.getAttribute("aria-disabled") === "true") return false;
-            if (candidate.closest("[aria-disabled='true'], [data-disabled='true']")) {
-              return false;
-            }
-            const href = candidate.getAttribute("href") || "";
-            const innerLabel = normalizeText(
-              candidate.innerText || candidate.textContent || "",
+          let el = null;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            let activitiesRoot = null;
+            const activitiesHeading = Array.from(document.querySelectorAll("h2, h3, h4")).find(
+              (heading) => isVisible(heading) && /activities|hoạt động|tareas|activités|aufgaben/i.test(normalizeText(heading.textContent)),
             );
-            const ariaLabel = normalizeText(candidate.getAttribute("aria-label") || "");
-            // Match using aria-label (preferred) or innerText, same as getQuestActivities
-            const label = ariaLabel || innerLabel;
-            return href + "|" + label.toLowerCase() === keyToClick;
-          });
+            if (activitiesHeading) {
+              activitiesRoot =
+                activitiesHeading.closest("div.overflow-hidden, section, [role='region'], .content-container") ||
+                activitiesHeading.parentElement?.parentElement?.parentElement;
+            }
+            if (!activitiesRoot) {
+              activitiesRoot = document.querySelector("#quests-details, dialog, [role='dialog'], .action-pane");
+            }
+            
+            if (activitiesRoot) {
+              el = Array.from(
+                activitiesRoot.querySelectorAll(
+                  "a[href], button, [role='button'], [role='link']",
+                ),
+              ).find((candidate) => {
+                if (!isVisible(candidate)) return false;
+                if (candidate.closest("nav, header, [role='banner']")) return false;
+                if (candidate.classList.contains("rounded-cornerCardDefault")) return false;
 
-          if (!el) return false;
+                const innerLabel = normalizeText(candidate.innerText || candidate.textContent || "");
+                const ariaLabel = normalizeText(candidate.getAttribute("aria-label") || "");
+                const label = (ariaLabel + " " + innerLabel).trim().toLowerCase();
 
-          try {
-            el.scrollIntoView({ behavior: "smooth", block: "center" });
-          } catch {}
+                if (!label) return false;
+                if (/^(activities|hoạt động|tareas|activités|aufgaben)$/i.test(label)) return false;
+                if (/^(status:|expires:|trạng thái:|hết hạn:)/i.test(label)) return false;
+                if (/^(feedback|privacy|terms|microsoft|bing|search)$/i.test(label)) return false;
+                if (candidate.getAttribute("aria-disabled") === "true") return false;
+                if (candidate.closest("[aria-disabled='true'], [data-disabled='true']")) return false;
+                if (/^(back|close|quay lại|đóng|zurück|schließen|retour|fermer|volver|cerrar)$/i.test(innerLabel)) return false;
 
-          for (const type of ["mouseover", "mousedown", "mouseup"]) {
-            try {
-              el.dispatchEvent(
-                new MouseEvent(type, {
-                  view: window,
-                  bubbles: true,
-                  cancelable: true,
-                }),
-              );
-            } catch {}
+                const isCompleted = candidate.closest("[class*='completed'], [class*='Success']") || 
+                                    candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
+                                    /completed|done|hoàn thành|đã xong/i.test(label);
+                if (isCompleted) return false;
+
+                const href = candidate.getAttribute("href") || "";
+                const candLabel = ariaLabel || innerLabel;
+                const candKey = href + "|" + candLabel.toLowerCase();
+                
+                // Robust matching: if the key has a valid href, and the candidate matches it exactly, return true
+                const targetHrefPart = keyToClick.split("|")[0];
+                if (targetHrefPart && href && href === targetHrefPart) {
+                  return true;
+                }
+                
+                return candKey === keyToClick;
+              });
+            }
+
+            if (el) break;
+            await sleep(800);
           }
 
-          try {
-            el.click();
-          } catch {}
+          if (!el) return { clicked: false, href: "" };
 
-          return true;
+          function centerPoint(element) {
+            const rect = element.getBoundingClientRect();
+            return {
+              clientX: rect.left + Math.max(1, Math.min(rect.width - 1, rect.width / 2)),
+              clientY: rect.top + Math.max(1, Math.min(rect.height - 1, rect.height / 2)),
+            };
+          }
+
+          function dispatchPointerMouseSequence(target) {
+            if (!target) return false;
+            const point = centerPoint(target);
+            const common = {
+              view: window, bubbles: true, cancelable: true, composed: true,
+              button: 0, buttons: 1, clientX: point.clientX, clientY: point.clientY,
+            };
+            const eventPlan = [
+              ["pointerover", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse" }],
+              ["pointerenter", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse" }],
+              ["mouseover", MouseEvent, {}],
+              ["mouseenter", MouseEvent, {}],
+              ["pointermove", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse" }],
+              ["mousemove", MouseEvent, {}],
+              ["pointerdown", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0.5 }],
+              ["mousedown", MouseEvent, {}],
+              ["pointerup", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0 }],
+              ["mouseup", MouseEvent, {}],
+              ["click", MouseEvent, {}],
+            ];
+            for (const [type, Ctor, extra] of eventPlan) {
+              try {
+                const EventCtor = Ctor === PointerEvent && typeof PointerEvent !== "function" ? MouseEvent : Ctor;
+                target.dispatchEvent(new EventCtor(type, { ...common, ...extra }));
+              } catch {}
+            }
+            return true;
+          }
+
+          function getClickableTargets(container) {
+            if (!container) return [];
+            const candidates = [
+              container.matches?.("a[href], [role=\"link\"], [role=\"button\"], button") ? container : null,
+              container.querySelector("a[href]"),
+              container.querySelector("button"),
+              container.querySelector("[role=\"link\"]"),
+              container.querySelector("[role=\"button\"]"),
+              container.querySelector("img"),
+              container.querySelector("mee-icon"),
+              container.querySelector("svg"),
+              container,
+            ].filter(Boolean);
+            const unique = [];
+            const seen = new Set();
+            for (const c of candidates) {
+              if (!(c instanceof HTMLElement)) continue;
+              if (!isVisible(c)) continue;
+              if (seen.has(c)) continue;
+              seen.add(c);
+              unique.push(c);
+            }
+            return unique;
+          }
+
+          const targets = getClickableTargets(el);
+          let success = false;
+
+          for (const target of targets) {
+            try {
+              target.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+            } catch {}
+            
+            try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+
+            try {
+              dispatchPointerMouseSequence(target);
+              await sleep(300);
+            } catch {}
+
+            try {
+              target.click();
+              // Brute-force click all inner elements in case React is attached to a child span/svg
+              const children = target.querySelectorAll("*");
+              for (const child of children) {
+                try { child.click(); } catch {}
+              }
+              await sleep(300);
+            } catch {}
+
+            for (const key of ["Enter", " "]) {
+               try {
+                 const code = key === " " ? "Space" : key;
+                 try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+                 for (const type of ["keydown", "keypress", "keyup"]) {
+                   target.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true, composed: true }));
+                 }
+                 await sleep(200);
+               } catch {}
+            }
+            
+            success = true;
+          }
+
+          return { clicked: success, href: el.getAttribute("href") };
         },
       });
 
@@ -1350,10 +1504,15 @@ async function autoClickRewards() {
             return false;
           }
 
-          const cards = (sectionIds || [])
-            .map((sectionId) => collectSectionCardsById(sectionId))
-            .flat();
-          const card = cards.find((a) => buildCardKey(a) === keyToClick);
+          let card = null;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            const cardsList = (sectionIds || [])
+              .map((sectionId) => collectSectionCardsById(sectionId))
+              .flat();
+            card = cardsList.find((a) => buildCardKey(a) === keyToClick);
+            if (card) break;
+            await sleep(800);
+          }
 
           if (!card) {
             console.log(`[Rewards] Card not found for key: ${keyToClick.substring(0, 80)}`);
@@ -1588,7 +1747,8 @@ async function autoClickRewards() {
     const baselineTabIds = new Set(
       tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)),
     );
-    const tab = await chrome.tabs.create({ url, active: false, windowId });
+    const tab = await chrome.tabs.create({ url, active: true, windowId });
+    await ensureTabFocused(tab.id);
     const spawnedTabIds = new Set();
     const onCreated = (createdTab) => {
       // Only track tabs spawned in our window
@@ -1600,6 +1760,7 @@ async function autoClickRewards() {
 
     try {
       await waitForTabComplete(tab.id);
+      await ensureTabFocused(tab.id);
       await new Promise((r) => setTimeout(r, /rewards\.bing\.com\/dashboard/i.test(url) ? 8000 : 2000));
 
       if (/rewards\.bing\.com\/dashboard/i.test(url)) {
@@ -1646,6 +1807,7 @@ async function autoClickRewards() {
           }
 
           await waitForTabComplete(tab.id);
+          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
 
           const attemptedActivityKeys = new Set();
@@ -1677,19 +1839,38 @@ async function autoClickRewards() {
                 ")",
             );
 
-            await clickQuestActivity(tab.id, nextActivity.key);
+            const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
+            const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
+            const targetHref = typeof clickResult === "object" ? clickResult.href : null;
+            
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
             const currentTabs = await chrome.tabs.query({ windowId });
-            const newTabIds = currentTabs
+            let newTabIds = currentTabs
               .map((t) => t.id)
               .filter((id) => Number.isInteger(id))
               .filter((id) => !baselineTabIds.has(id))
               .filter((id) => id !== tab.id);
 
+            // Fallback: If no new tab opened, but we have a valid href, manually open it to register the punch
+            if (newTabIds.length === 0 && wasClicked && targetHref && targetHref.startsWith("http")) {
+              console.log("[Rewards] DOM click failed to open new tab, falling back to manual open: " + targetHref);
+              try {
+                // MUST be active: true so Bing's tracking script on the search page fires!
+                const fallbackTab = await chrome.tabs.create({ url: targetHref, active: true, windowId });
+                newTabIds.push(fallbackTab.id);
+                await waitForTabComplete(fallbackTab.id);
+              } catch (e) {
+                console.warn("[Rewards] Fallback tab creation failed:", e);
+              }
+            }
+
             // Scroll like a human on each child tab before closing
             for (const childTabId of newTabIds) {
               try {
+                // Ensure the tab is active so that tracking pixels fire properly
+                await chrome.tabs.update(childTabId, { active: true });
+                await waitForTabComplete(childTabId);
                 await humanScrollOnTab(childTabId);
               } catch {}
             }
@@ -1706,8 +1887,9 @@ async function autoClickRewards() {
             }
           }
 
-          await chrome.tabs.update(tab.id, { url, active: false });
+          await chrome.tabs.update(tab.id, { url, active: true });
           await waitForTabComplete(tab.id);
+          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
@@ -1770,8 +1952,9 @@ async function autoClickRewards() {
 
         // Navigate back to rewards page for the next card
         if (i < rewardCards.length - 1) {
-          await chrome.tabs.update(tab.id, { url, active: false });
+          await chrome.tabs.update(tab.id, { url, active: true });
           await waitForTabComplete(tab.id);
+          await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
@@ -1888,12 +2071,12 @@ async function openBingAndType(query) {
       await chrome.tabs.get(tabId);
       await chrome.tabs.update(tabId, {
         url: "https://www.bing.com/",
-        active: false,
+        active: true,
       });
     } catch {
       const created = await chrome.tabs.create({
         url: "https://www.bing.com/",
-        active: false,
+        active: true,
         windowId: singletonWindowId,
       });
       tabId = created.id;
@@ -1902,7 +2085,7 @@ async function openBingAndType(query) {
   } else {
     const created = await chrome.tabs.create({
       url: "https://www.bing.com/",
-      active: false,
+      active: true,
       windowId: singletonWindowId,
     });
     tabId = created.id;
@@ -1911,6 +2094,7 @@ async function openBingAndType(query) {
 
   try {
     await waitForTabComplete(tabId);
+    await ensureTabFocused(tabId);
     await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
@@ -1919,7 +2103,7 @@ async function openBingAndType(query) {
     });
   } catch (e) {
     const url = "https://www.bing.com/search?q=" + encodeURIComponent(query);
-    await chrome.tabs.update(tabId, { url, active: false });
+    await chrome.tabs.update(tabId, { url, active: true });
   }
 }
 
