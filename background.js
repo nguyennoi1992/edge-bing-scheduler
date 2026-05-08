@@ -1208,27 +1208,30 @@ async function autoClickRewards() {
                   "";
                 const text = normalizeRewardText(card.innerText || card.textContent || "");
                 const key = buildRewardCardKey({ href, text });
-                const isActionable = isActionableRewardCard({
+                const meta = {
                   href,
                   text,
-                  hasVisual:
-                    !!card.querySelector("img, mee-icon, svg, .mee-icon"),
-                  isDisabled:
-                    card.getAttribute("aria-disabled") === "true" ||
-                    !!card.closest("[aria-disabled='true'], [data-disabled='true']"),
+                  hasVisual: !!card.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
+                  isDisabled: card.getAttribute("aria-disabled") === "true" || !!card.closest("[aria-disabled='true'], [data-disabled='true']"),
                   isCompleted: isCardCompleted(card),
                   isVisible: isVisible(card),
                   isInNav: !!card.closest("nav, header, footer, [role='banner']"),
                   isQuestCard: !!card.closest("#quests"),
                   isHeader: card.hasAttribute("slot") || card.hasAttribute("aria-controls") || card.hasAttribute("aria-expanded") || !!card.closest("h1, h2, h3, h4") || !!card.querySelector("h1, h2, h3, h4"),
-                  isPressable:
-                    card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") ||
-                    !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
-                });
-                if (!isActionable) continue;
+                  isPressable: card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") || !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
+                };
+                const isActionable = isActionableRewardCard(meta);
+                
+                if (!isActionable) {
+                  // Debug logging to find out WHY the card was rejected
+                  console.log(`[Rewards-Debug] Card rejected. href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}... Meta:`, JSON.stringify(meta));
+                  continue;
+                }
+                
                 if (seen.has(key)) continue;
                 seen.add(key);
                 unique.push(card);
+                console.log(`[Rewards-Debug] Card accepted! href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}...`);
               }
 
               console.log(
@@ -2107,9 +2110,9 @@ async function autoClickRewards() {
       // Determine which sections to click based on the current URL
       let targetSectionIds = rewardSectionIds;
       if (/rewards\.bing\.com\/earn/i.test(url)) {
-        targetSectionIds = ["moreactivities"]; // Keep earning
+        targetSectionIds = ["moreactivities", "keepearning", "microsoft", "global"]; // Keep earning
       } else if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        targetSectionIds = ["dailyset", "daily-sets", "dailypointitem"]; // Daily set
+        targetSectionIds = ["dailyset", "daily-sets", "dailypointitem", "moreactivities", "microsoft", "global"]; // Daily set
       }
 
       // Collect all reward cards once, click through each one, then move on.
