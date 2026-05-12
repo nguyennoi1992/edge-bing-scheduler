@@ -9,7 +9,8 @@
     "alarms",
     "tabs",
     "notifications",
-    "scripting"
+    "scripting",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://www.bing.com/*",
@@ -22,6 +23,9 @@
   "action": {
     "default_title": "Bing Scheduler",
     "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidebar.html"
   },
   "options_page": "options.html",
   "icons": {
