@@ -1961,11 +1961,16 @@ async function autoClickRewards() {
       await injectDomHelpers(tab.id);
 
       if (/rewards\.bing\.com\/dashboard/i.test(url)) {
+        await appendDebugLog("info", "rewards", "Scanning for ready-to-claim card on dashboard", { url });
         const claimResult = await claimReadyPoints(tab.id);
         if (claimResult.clicked) {
           console.log(
             `[Rewards] Claimed ${claimResult.claimedPoints} ready point(s) from dashboard`,
           );
+          await appendDebugLog("success", "rewards", `Claimed ${claimResult.claimedPoints} ready point(s)`, {
+            url,
+            points: claimResult.claimedPoints,
+          });
           await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
           await chrome.tabs.reload(tab.id);
           await waitForTabComplete(tab.id);
@@ -1975,6 +1980,10 @@ async function autoClickRewards() {
           console.log(
             `[Rewards] No ready points claimed on dashboard (${claimResult.reason || "not_available"})`,
           );
+          await appendDebugLog("info", "rewards", "No ready-to-claim card found", {
+            url,
+            reason: claimResult.reason || "not_available",
+          });
         }
       }
 
