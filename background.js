@@ -2377,7 +2377,15 @@ async function humanBrowseSearchResults(tabId) {
     await waitForTabComplete(tabId, 15000);
     await new Promise((r) => setTimeout(r, 1500));
 
-    await chrome.scripting.executeScript({
+    // Resolve windowId for tab management
+    const tabInfo = await chrome.tabs.get(tabId);
+    const windowId = tabInfo.windowId;
+
+    // Snapshot existing tabs so we can detect + close any new ones
+    const tabsBefore = await chrome.tabs.query({ windowId });
+    const baselineIds = new Set(tabsBefore.map((t) => t.id).filter((id) => Number.isInteger(id)));
+
+    const [{ result: browseResult } = {}] = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
       func: async () => {
@@ -2403,7 +2411,6 @@ async function humanBrowseSearchResults(tabId) {
           const targetY = Math.min(currentY + scrollAmount, maxScroll);
           window.scrollTo({ top: targetY, behavior: "smooth" });
           currentY = targetY;
-          // Reading pause
           await sleep(rand(600, 2200));
           if (currentY >= maxScroll) break;
         }
@@ -2441,7 +2448,6 @@ async function humanBrowseSearchResults(tabId) {
             link.dispatchEvent(new MouseEvent("mouseover", common));
             link.dispatchEvent(new MouseEvent("mouseenter", { ...common, bubbles: false }));
             link.dispatchEvent(new MouseEvent("mousemove", common));
-            // Dwell on the link like reading the title
             await sleep(rand(400, 1500));
             link.dispatchEvent(new MouseEvent("mouseleave", { ...common, bubbles: false }));
             link.dispatchEvent(new MouseEvent("mouseout", common));
@@ -2449,41 +2455,30 @@ async function humanBrowseSearchResults(tabId) {
           await sleep(rand(200, 600));
         }
 
-        // --- Phase 3: Occasionally click a result (~30% chance) ---
+        // --- Phase 3: Pick a result to click (~30% chance) ---
+        // Return the href instead of clicking — let the background script handle
+        // tab creation/cleanup so we don't lose context or leave orphan tabs.
+        let clickHref = null;
         const shouldClick = Math.random() < 0.3 && resultLinks.length > 0;
         if (shouldClick) {
-          // Pick a random top-5 result (more likely to click top results)
           const topResults = resultLinks.slice(0, Math.min(5, resultLinks.length));
           const target = topResults[rand(0, topResults.length - 1)];
           if (target) {
-            try {
-              target.scrollIntoView({ behavior: "smooth", block: "center" });
-              await sleep(rand(300, 700));
-
-              const rect = target.getBoundingClientRect();
-              const cx = rect.left + rand(5, Math.max(6, rect.width - 5));
-              const cy = rect.top + rand(2, Math.max(3, rect.height - 2));
-              const common = {
-                view: window, bubbles: true, cancelable: true, composed: true,
-                button: 0, buttons: 1, clientX: cx, clientY: cy,
-              };
-
-              // Full click sequence
-              target.dispatchEvent(new MouseEvent("mouseover", common));
-              target.dispatchEvent(new MouseEvent("mousemove", common));
-              await sleep(rand(50, 200));
-              target.dispatchEvent(new MouseEvent("mousedown", common));
-              await sleep(rand(50, 150));
-              target.dispatchEvent(new MouseEvent("mouseup", common));
-              target.dispatchEvent(new MouseEvent("click", common));
-
-              // Wait as if reading the page
-              await sleep(rand(3000, 8000));
-
-              // Go back to search results
-              window.history.back();
-              await sleep(rand(1000, 2500));
-            } catch { }
+            clickHref = target.href || target.getAttribute("href") || null;
+            // Simulate hover on the chosen link before "clicking"
+            if (clickHref) {
+              try {
+                target.scrollIntoView({ behavior: "smooth", block: "center" });
+                await sleep(rand(300, 700));
+                const rect = target.getBoundingClientRect();
+                const cx = rect.left + rand(5, Math.max(6, rect.width - 5));
+                const cy = rect.top + rand(2, Math.max(3, rect.height - 2));
+                const common = { view: window, bubbles: true, cancelable: true, clientX: cx, clientY: cy };
+                target.dispatchEvent(new MouseEvent("mouseover", common));
+                target.dispatchEvent(new MouseEvent("mousemove", common));
+                await sleep(rand(200, 500));
+              } catch { }
+            }
           }
         }
 
@@ -2512,8 +2507,44 @@ async function humanBrowseSearchResults(tabId) {
           } catch { }
           await sleep(rand(150, 500));
         }
+
+        return { clickHref };
       },
     });
+
+    // --- Handle click result: open in new tab, scroll, then close ---
+    const clickHref = browseResult?.clickHref;
+    if (clickHref && /^https?:\/\//i.test(clickHref)) {
+      try {
+        console.log(`[Search] Clicking search result: ${clickHref.substring(0, 80)}`);
+        const childTab = await chrome.tabs.create({ url: clickHref, active: true, windowId });
+        await waitForTabComplete(childTab.id, 15000);
+        await humanScrollOnTab(childTab.id, 12000);
+        await chrome.tabs.remove(childTab.id);
+        console.log(`[Search] Closed clicked result tab ${childTab.id}`);
+      } catch (e) {
+        console.warn(`[Search] Failed handling clicked result:`, e?.message || e);
+      }
+    }
+
+    // --- Cleanup: close any unexpected tabs spawned during browsing ---
+    try {
+      const tabsAfter = await chrome.tabs.query({ windowId });
+      const orphanIds = tabsAfter
+        .map((t) => t.id)
+        .filter((id) => Number.isInteger(id))
+        .filter((id) => !baselineIds.has(id) && id !== tabId);
+      if (orphanIds.length) {
+        await chrome.tabs.remove(orphanIds);
+        console.log(`[Search] Closed ${orphanIds.length} orphan tab(s) from browse`);
+      }
+    } catch { }
+
+    // Re-focus the search tab
+    try {
+      await chrome.tabs.update(tabId, { active: true });
+      await ensureTabFocused(tabId);
+    } catch { }
 
     console.log(`[Search] Human browse completed on tab ${tabId}`);
   } catch (e) {
