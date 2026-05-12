@@ -218,7 +218,9 @@ async function injectDomHelpers(tabId) {
         if (!href && !meta.isPressable) return false;
         if (meta.isHeader) return false;
         if (href === "/earn") return false;
-        if (text.includes("see more tasks") || text.includes("earn more")) return false;
+        // Only skip short navigation buttons like "Earn more" or "See more tasks",
+        // NOT cards whose longer description happens to contain these phrases.
+        if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
 
         return true;
       };
@@ -332,7 +334,7 @@ async function autoClickRewards() {
             if (!el) return false;
             try {
               el.scrollIntoView({ behavior: "instant", block: "center" });
-            } catch {}
+            } catch { }
 
             const eventTypes = [
               "pointerover",
@@ -359,12 +361,12 @@ async function autoClickRewards() {
                     buttons: 1,
                   }),
                 );
-              } catch {}
+              } catch { }
             }
 
             try {
               el.click();
-            } catch {}
+            } catch { }
             return true;
           };
 
@@ -620,7 +622,7 @@ async function autoClickRewards() {
             if (currentY <= 0) break;
           }
 
-          
+
           console.log("[Rewards-Debug] humanScrollOnTab: Phase 4 - Dispatching random mousemove events.");
           // Phase 4: Small random mouse-move events to look human
           for (let i = 0; i < rand(2, 5); i++) {
@@ -632,7 +634,7 @@ async function autoClickRewards() {
                   bubbles: true,
                 })
               );
-            } catch {}
+            } catch { }
             await sleep(rand(200, 600));
           }
 
@@ -676,7 +678,7 @@ async function autoClickRewards() {
 
           for (const node of questNodes) {
             if (!isVisible(node)) continue;
-            
+
             const href = node.getAttribute("href") || "";
             // Skip non-quest navigation links inside #quests
             if (node.tagName.toLowerCase() === "a" && (!href || !/\/earn\/quest\//i.test(href))) {
@@ -735,7 +737,7 @@ async function autoClickRewards() {
             const questNodes = Array.from(
               document.querySelectorAll("#quests a[href], #quests button, #quests [role=\'button\'], #quests .rounded-cornerCardDefault, #quests [data-react-aria-pressable=\'true\']")
             );
-          console.log("[Rewards-Debug] getQuestCards: Found " + questNodes.length + " potential quest nodes in DOM.");
+            console.log("[Rewards-Debug] getQuestCards: Found " + questNodes.length + " potential quest nodes in DOM.");
 
             card = questNodes.find((el) => {
               if (!isVisible(el)) return false;
@@ -754,7 +756,7 @@ async function autoClickRewards() {
           try {
             console.log("[Rewards-Debug] clickQuestCard: Found target quest card. Scrolling into view and simulating clicks...");
             card.scrollIntoView({ behavior: "instant", block: "center" });
-          } catch {}
+          } catch { }
 
           for (const type of ["mouseover", "mousedown", "mouseup"]) {
             try {
@@ -765,12 +767,12 @@ async function autoClickRewards() {
                   cancelable: true,
                 }),
               );
-            } catch {}
+            } catch { }
           }
 
           try {
             card.click();
-          } catch {}
+          } catch { }
 
           return true;
         },
@@ -891,7 +893,7 @@ async function autoClickRewards() {
           let actionEl = null;
           for (let attempt = 0; attempt < 20; attempt++) {
             console.log("[Rewards-Debug] getQuestActivities: Scanning DOM for activities section...");
-          let activitiesRoot = null;
+            let activitiesRoot = null;
             const activitiesHeading = Array.from(document.querySelectorAll("h2, h3, h4")).find(
               (heading) => isVisible(heading) && /activities|hoạt động|tareas|activités|aufgaben/i.test(normalizeRewardText(heading.textContent)),
             );
@@ -903,7 +905,7 @@ async function autoClickRewards() {
             if (!activitiesRoot) {
               activitiesRoot = document.querySelector("#quests-details, dialog, [role='dialog'], .action-pane");
             }
-            
+
             if (activitiesRoot) {
               const cards = Array.from(
                 activitiesRoot.querySelectorAll(
@@ -990,7 +992,7 @@ async function autoClickRewards() {
               try {
                 const EventCtor = Ctor === PointerEvent && typeof PointerEvent !== "function" ? MouseEvent : Ctor;
                 target.dispatchEvent(new EventCtor(type, { ...common, ...extra }));
-              } catch {}
+              } catch { }
             }
             return true;
           }
@@ -1030,37 +1032,37 @@ async function autoClickRewards() {
           for (const target of targets) {
             try {
               target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-            } catch {}
-            
-            try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+            } catch { }
+
+            try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch { } }
 
             try {
               dispatchPointerMouseSequence(target);
               await sleep(300);
-            } catch {}
+            } catch { }
 
             try {
               target.click();
               // Brute-force click all inner elements in case React is attached to a child span/svg
               const children = target.querySelectorAll("*");
               for (const child of children) {
-                try { child.click(); } catch {}
+                try { child.click(); } catch { }
               }
               await sleep(300);
-            } catch {}
+            } catch { }
 
             for (const key of ["Enter", " "]) {
               console.log("[Rewards-Debug] Keyboard Fallback: Attempting to trigger click via \'" + key + "\' key press...");
-               try {
-                 const code = key === " " ? "Space" : key;
-                 try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
-                 for (const type of ["keydown", "keypress", "keyup"]) {
-                   target.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true, composed: true }));
-                 }
-                 await sleep(200);
-               } catch {}
+              try {
+                const code = key === " " ? "Space" : key;
+                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch { } }
+                for (const type of ["keydown", "keypress", "keyup"]) {
+                  target.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true, composed: true }));
+                }
+                await sleep(200);
+              } catch { }
             }
-            
+
             console.log("[Rewards-Debug] Fallback: Using document.elementFromPoint to find top-most element.");
             // elementFromPoint fallback: click exactly what is on the screen at this coordinate
             try {
@@ -1071,7 +1073,7 @@ async function autoClickRewards() {
                 topEl.click();
                 await sleep(200);
               }
-            } catch {}
+            } catch { }
 
             const afterUrl = location.href;
             const afterText = normalizeRewardText(document.body?.innerText || document.body?.textContent || "");
@@ -1126,14 +1128,14 @@ async function autoClickRewards() {
               if (trigger) {
                 try {
                   trigger.click();
-                } catch {}
+                } catch { }
               }
               // Also handle aria-expanded on buttons with aria-controls
               const collapsedBtns = section.querySelectorAll(
                 "button[aria-expanded='false'][aria-controls]",
               );
               for (const btn of collapsedBtns) {
-                try { btn.click(); } catch {}
+                try { btn.click(); } catch { }
               }
             }
 
@@ -1221,13 +1223,13 @@ async function autoClickRewards() {
                   isPressable: card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") || !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
                 };
                 const isActionable = isActionableRewardCard(meta);
-                
+
                 if (!isActionable) {
                   // Debug logging to find out WHY the card was rejected
                   console.log(`[Rewards-Debug] Card rejected. href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}... Meta:`, JSON.stringify(meta));
                   continue;
                 }
-                
+
                 if (seen.has(key)) continue;
                 seen.add(key);
                 unique.push(card);
@@ -1353,14 +1355,14 @@ async function autoClickRewards() {
             if (trigger) {
               try {
                 trigger.click();
-              } catch {}
+              } catch { }
             }
             // Also handle aria-expanded on buttons with aria-controls
             const collapsedBtns = section.querySelectorAll(
               "button[aria-expanded='false'][aria-controls]",
             );
             for (const btn of collapsedBtns) {
-              try { btn.click(); } catch {}
+              try { btn.click(); } catch { }
             }
           }
 
@@ -1553,7 +1555,7 @@ async function autoClickRewards() {
                     ? MouseEvent
                     : Ctor;
                 target.dispatchEvent(new EventCtor(type, { ...common, ...extra }));
-              } catch {}
+              } catch { }
             }
 
             return true;
@@ -1573,14 +1575,14 @@ async function autoClickRewards() {
 
             try {
               target.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-            } catch {}
+            } catch { }
 
             try {
               target.focus({ preventScroll: true });
             } catch {
               try {
                 target.focus();
-              } catch {}
+              } catch { }
             }
 
             // For external links (target="_blank"), clicking opens a new tab
@@ -1591,24 +1593,24 @@ async function autoClickRewards() {
               try {
                 dispatchPointerMouseSequence(target);
                 await sleep(300);
-              } catch {}
+              } catch { }
 
               // Native .click()
               try {
                 target.click();
                 await sleep(300);
-              } catch {}
+              } catch { }
 
               // Keyboard Enter as fallback
               try {
-                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch { } }
                 for (const type of ["keydown", "keypress", "keyup"]) {
                   target.dispatchEvent(
                     new KeyboardEvent(type, { key: "Enter", code: "Enter", bubbles: true, cancelable: true, composed: true }),
                   );
                 }
                 await sleep(300);
-              } catch {}
+              } catch { }
 
               const linkHref = card.href || card.getAttribute("href") || "";
               console.log(`[Rewards] Clicked external link card: ${linkHref.substring(0, 80)}`);
@@ -1622,7 +1624,7 @@ async function autoClickRewards() {
               if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
                 return true;
               }
-            } catch {}
+            } catch { }
 
             try {
               target.click();
@@ -1630,14 +1632,14 @@ async function autoClickRewards() {
               if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
                 return true;
               }
-            } catch {}
+            } catch { }
 
             // Keyboard fallback (Enter / Space)
             for (const key of ["Enter", " "]) {
               console.log("[Rewards-Debug] Keyboard Fallback: Attempting to trigger click via \'" + key + "\' key press...");
               try {
                 const code = key === " " ? "Space" : key;
-                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch { } }
                 for (const type of ["keydown", "keypress", "keyup"]) {
                   target.dispatchEvent(
                     new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true, composed: true }),
@@ -1647,7 +1649,7 @@ async function autoClickRewards() {
                 if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
                   return true;
                 }
-              } catch {}
+              } catch { }
             }
 
             console.log("[Rewards-Debug] Fallback: Using document.elementFromPoint to find top-most element.");
@@ -1666,7 +1668,7 @@ async function autoClickRewards() {
                 if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
                   return true;
                 }
-              } catch {}
+              } catch { }
 
               try {
                 topEl.click();
@@ -1674,7 +1676,7 @@ async function autoClickRewards() {
                 if (getCardSignature(card) !== beforeSignature || location.href !== beforeUrl) {
                   return true;
                 }
-              } catch {}
+              } catch { }
             }
 
             return false;
@@ -1772,13 +1774,13 @@ async function autoClickRewards() {
               if (!el) return false;
               try {
                 el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
-              } catch {}
+              } catch { }
               try {
                 el.focus({ preventScroll: true });
               } catch {
                 try {
                   el.focus();
-                } catch {}
+                } catch { }
               }
 
               const rect = el.getBoundingClientRect();
@@ -1809,12 +1811,12 @@ async function autoClickRewards() {
                       ? MouseEvent
                       : Ctor;
                   el.dispatchEvent(new EventCtor(type, { ...common, ...extra }));
-                } catch {}
+                } catch { }
               }
 
               try {
                 el.click();
-              } catch {}
+              } catch { }
               return true;
             };
 
@@ -2036,18 +2038,18 @@ async function autoClickRewards() {
             attemptedActivityKeys.add(nextActivity.key);
             console.log(
               "[Rewards] Clicking quest activity " +
-                (j + 1) +
-                ": " +
-                nextActivity.label +
-                " (" +
-                (nextActivity.href || "no_href") +
-                ")",
+              (j + 1) +
+              ": " +
+              nextActivity.label +
+              " (" +
+              (nextActivity.href || "no_href") +
+              ")",
             );
 
             const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
             const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
             const targetHref = typeof clickResult === "object" ? clickResult.href : null;
-            
+
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
             const currentTabs = await chrome.tabs.query({ windowId });
@@ -2065,7 +2067,7 @@ async function autoClickRewards() {
               }
               if (fullHref.startsWith("http")) {
                 await appendDebugLog("warn", "quests", "DOM click failed, falling back to manual open", { url: fullHref });
-              console.log("[Rewards] DOM click failed to open new tab, falling back to manual open: " + fullHref);
+                console.log("[Rewards] DOM click failed to open new tab, falling back to manual open: " + fullHref);
                 try {
                   // MUST be active: true so Bing's tracking script on the search page fires!
                   const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId });
@@ -2084,7 +2086,7 @@ async function autoClickRewards() {
                 await chrome.tabs.update(childTabId, { active: true });
                 await waitForTabComplete(childTabId);
                 await humanScrollOnTab(childTabId);
-              } catch {}
+              } catch { }
             }
 
             if (newTabIds.length) {
@@ -2107,12 +2109,14 @@ async function autoClickRewards() {
         }
       }
 
-      // Determine which sections to click based on the current URL
+      // Determine which sections to click based on the current URL.
+      // Do NOT include "global" — it scans the entire document and picks up
+      // unrelated links (redeem, shop, etc.) that aren't reward cards.
       let targetSectionIds = rewardSectionIds;
       if (/rewards\.bing\.com\/earn/i.test(url)) {
-        targetSectionIds = ["moreactivities", "keepearning", "microsoft", "global"]; // Keep earning
+        targetSectionIds = ["moreactivities", "keepearning"];
       } else if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        targetSectionIds = ["dailyset", "daily-sets", "dailypointitem", "moreactivities", "microsoft", "global"]; // Daily set
+        targetSectionIds = ["dailyset", "daily-sets", "dailypointitem", "moreactivities"];
       }
 
       // Collect all reward cards once, click through each one, then move on.
@@ -2138,7 +2142,7 @@ async function autoClickRewards() {
 
         const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
         const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
-        
+
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
         // Collect and scroll child tabs that were spawned before closing
@@ -2156,7 +2160,7 @@ async function autoClickRewards() {
           }
           if (fullHref.startsWith("http")) {
             await appendDebugLog("warn", "quests", "DOM click failed, falling back to manual open", { url: fullHref });
-              console.log("[Rewards] DOM click failed to open new tab, falling back to manual open: " + fullHref);
+            console.log("[Rewards] DOM click failed to open new tab, falling back to manual open: " + fullHref);
             try {
               const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId });
               newTabIds.push(fallbackTab.id);
@@ -2173,7 +2177,7 @@ async function autoClickRewards() {
             await chrome.tabs.update(childTabId, { active: true });
             await waitForTabComplete(childTabId);
             await humanScrollOnTab(childTabId);
-          } catch {}
+          } catch { }
         }
 
         // Close child tabs after scrolling
@@ -2293,7 +2297,7 @@ function waitForTabComplete(tabId, timeoutMs = 15000) {
         clearInterval(t);
         reject(new Error("timeout waiting for tab load"));
       } else {
-        let tInfo; try { tInfo = await chrome.tabs.get(tabId); } catch(e) { chrome.tabs.onUpdated.removeListener(onUpdated); clearInterval(t); return reject(e); }
+        let tInfo; try { tInfo = await chrome.tabs.get(tabId); } catch (e) { chrome.tabs.onUpdated.removeListener(onUpdated); clearInterval(t); return reject(e); }
         if (tInfo.status === "complete") {
           chrome.tabs.onUpdated.removeListener(onUpdated);
           clearInterval(t);
@@ -2521,7 +2525,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener(() => {
   scheduleAlarm();
   updateBadge();
-ensureRunTicker();
+  ensureRunTicker();
 });
 
 scheduleAlarm();

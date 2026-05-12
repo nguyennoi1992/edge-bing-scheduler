@@ -27,7 +27,9 @@ export function isActionableRewardCard(meta) {
   if (!text) return false;
   if (!href && !meta.isPressable) return false;
   if (href === "/earn") return false;
-  if (text.includes("see more tasks") || text.includes("earn more")) return false;
+  // Only skip short navigation buttons like "Earn more" or "See more tasks",
+  // NOT cards whose longer description happens to contain these phrases.
+  if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
 
   return true;
 }
