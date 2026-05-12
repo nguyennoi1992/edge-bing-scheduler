@@ -2357,6 +2357,161 @@ async function openBingAndType(query) {
   }
 }
 
+/**
+ * Simulate human-like browsing on a Bing search results page.
+ * - Scrolls through results in random increments with pauses
+ * - Hovers over random result links
+ * - Occasionally clicks a result, reads the page, then goes back
+ */
+async function humanBrowseSearchResults(tabId) {
+  try {
+    await waitForTabComplete(tabId, 15000);
+    await new Promise((r) => setTimeout(r, 1500));
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 900;
+        const pageHeight = Math.max(
+          document.body.scrollHeight || 0,
+          document.documentElement.scrollHeight || 0,
+          viewportHeight,
+        );
+        const maxScroll = Math.max(0, pageHeight - viewportHeight);
+
+        // --- Phase 1: Scroll down through results (2–5 steps) ---
+        let currentY = window.scrollY || 0;
+        const downSteps = rand(2, 5);
+        for (let i = 0; i < downSteps; i++) {
+          const scrollAmount = rand(
+            Math.floor(viewportHeight * 0.25),
+            Math.floor(viewportHeight * 0.7),
+          );
+          const targetY = Math.min(currentY + scrollAmount, maxScroll);
+          window.scrollTo({ top: targetY, behavior: "smooth" });
+          currentY = targetY;
+          // Reading pause
+          await sleep(rand(600, 2200));
+          if (currentY >= maxScroll) break;
+        }
+
+        // --- Phase 2: Hover over random result links ---
+        const resultLinks = Array.from(
+          document.querySelectorAll(
+            "#b_results a[href]:not([href^='javascript']), .b_algo a[href], ol#b_results h2 a",
+          ),
+        ).filter((el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.visibility !== "hidden" &&
+            style.display !== "none"
+          );
+        });
+
+        const hoverCount = rand(2, Math.min(5, resultLinks.length));
+        const shuffled = resultLinks.sort(() => Math.random() - 0.5).slice(0, hoverCount);
+
+        for (const link of shuffled) {
+          try {
+            link.scrollIntoView({ behavior: "smooth", block: "center" });
+            await sleep(rand(300, 800));
+
+            const rect = link.getBoundingClientRect();
+            const cx = rect.left + rand(5, Math.max(6, rect.width - 5));
+            const cy = rect.top + rand(2, Math.max(3, rect.height - 2));
+            const common = { view: window, bubbles: true, cancelable: true, clientX: cx, clientY: cy };
+
+            link.dispatchEvent(new MouseEvent("mouseover", common));
+            link.dispatchEvent(new MouseEvent("mouseenter", { ...common, bubbles: false }));
+            link.dispatchEvent(new MouseEvent("mousemove", common));
+            // Dwell on the link like reading the title
+            await sleep(rand(400, 1500));
+            link.dispatchEvent(new MouseEvent("mouseleave", { ...common, bubbles: false }));
+            link.dispatchEvent(new MouseEvent("mouseout", common));
+          } catch { }
+          await sleep(rand(200, 600));
+        }
+
+        // --- Phase 3: Occasionally click a result (~30% chance) ---
+        const shouldClick = Math.random() < 0.3 && resultLinks.length > 0;
+        if (shouldClick) {
+          // Pick a random top-5 result (more likely to click top results)
+          const topResults = resultLinks.slice(0, Math.min(5, resultLinks.length));
+          const target = topResults[rand(0, topResults.length - 1)];
+          if (target) {
+            try {
+              target.scrollIntoView({ behavior: "smooth", block: "center" });
+              await sleep(rand(300, 700));
+
+              const rect = target.getBoundingClientRect();
+              const cx = rect.left + rand(5, Math.max(6, rect.width - 5));
+              const cy = rect.top + rand(2, Math.max(3, rect.height - 2));
+              const common = {
+                view: window, bubbles: true, cancelable: true, composed: true,
+                button: 0, buttons: 1, clientX: cx, clientY: cy,
+              };
+
+              // Full click sequence
+              target.dispatchEvent(new MouseEvent("mouseover", common));
+              target.dispatchEvent(new MouseEvent("mousemove", common));
+              await sleep(rand(50, 200));
+              target.dispatchEvent(new MouseEvent("mousedown", common));
+              await sleep(rand(50, 150));
+              target.dispatchEvent(new MouseEvent("mouseup", common));
+              target.dispatchEvent(new MouseEvent("click", common));
+
+              // Wait as if reading the page
+              await sleep(rand(3000, 8000));
+
+              // Go back to search results
+              window.history.back();
+              await sleep(rand(1000, 2500));
+            } catch { }
+          }
+        }
+
+        // --- Phase 4: Scroll back up partially ---
+        const upSteps = rand(1, 2);
+        for (let i = 0; i < upSteps; i++) {
+          const scrollAmount = rand(
+            Math.floor(viewportHeight * 0.2),
+            Math.floor(viewportHeight * 0.5),
+          );
+          const targetY = Math.max((window.scrollY || 0) - scrollAmount, 0);
+          window.scrollTo({ top: targetY, behavior: "smooth" });
+          await sleep(rand(300, 900));
+        }
+
+        // --- Phase 5: Small random mouse movements ---
+        for (let i = 0; i < rand(1, 3); i++) {
+          try {
+            document.dispatchEvent(
+              new MouseEvent("mousemove", {
+                clientX: rand(80, window.innerWidth - 80),
+                clientY: rand(80, window.innerHeight - 80),
+                bubbles: true,
+              }),
+            );
+          } catch { }
+          await sleep(rand(150, 500));
+        }
+      },
+    });
+
+    console.log(`[Search] Human browse completed on tab ${tabId}`);
+  } catch (e) {
+    console.warn(`[Search] Human browse failed on tab ${tabId}:`, e?.message || e);
+  }
+}
+
 // ---------------- Run task ----------------
 async function runTask() {
   const cfg = await getConfig();
@@ -2395,6 +2550,13 @@ async function runTask() {
       total: queries.length,
     });
     await openBingAndType(queries[idx]);
+
+    // Simulate human browsing on ~60% of searches (vary behavior)
+    if (singletonTabId && Math.random() < 0.6) {
+      try {
+        await humanBrowseSearchResults(singletonTabId);
+      } catch { }
+    }
   }
 
   await chrome.storage.sync.set({ nextOpenAt: null });
