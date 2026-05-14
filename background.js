@@ -1176,7 +1176,12 @@ async function autoClickRewards() {
               for (const selector of selectors) {
                 const nodes = rootNode.querySelectorAll(selector);
                 for (const node of nodes) {
+                  const isDirectRewardAction =
+                    node.matches?.("a[href][data-react-aria-pressable='true'], a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']");
                   const card =
+                    isDirectRewardAction
+                      ? node
+                      :
                     node.closest("a[href].rounded-cornerCardDefault, button.rounded-cornerCardDefault, [role='button'].rounded-cornerCardDefault, [role='link'].rounded-cornerCardDefault, [data-react-aria-pressable='true'].rounded-cornerCardDefault") ||
                     node.closest(".rounded-cornerCardDefault") ||
                     node.closest("[class*='rounded-cornerCardDefault']") ||
@@ -1234,6 +1239,34 @@ async function autoClickRewards() {
                 seen.add(key);
                 unique.push(card);
                 console.log(`[Rewards-Debug] Card accepted! href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}...`);
+              }
+
+              for (const anchor of rootNode.querySelectorAll("a[href][data-react-aria-pressable='true']")) {
+                if (seen.has(anchor)) continue;
+
+                const href = anchor.getAttribute("href") || "";
+                const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
+                const key = buildRewardCardKey({ href, text });
+                const meta = {
+                  href,
+                  text,
+                  hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
+                  isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
+                  isCompleted: isCardCompleted(anchor),
+                  isVisible: isVisible(anchor),
+                  isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
+                  isQuestCard: !!anchor.closest("#quests"),
+                  isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                  isPressable: true,
+                };
+
+                if (!isActionableRewardCard(meta)) continue;
+                if (seen.has(key)) continue;
+
+                seen.add(anchor);
+                seen.add(key);
+                unique.push(anchor);
+                console.log(`[Rewards-Debug] Direct pressable anchor accepted! href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}...`);
               }
 
               console.log(
@@ -1404,7 +1437,12 @@ async function autoClickRewards() {
             for (const selector of selectors) {
               const nodes = rootNode.querySelectorAll(selector);
               for (const node of nodes) {
+                const isDirectRewardAction =
+                  node.matches?.("a[href][data-react-aria-pressable='true'], a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']");
                 const card =
+                  isDirectRewardAction
+                    ? node
+                    :
                   node.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") ||
                   node;
                 if (!card || seen.has(card)) continue;
@@ -2732,8 +2770,6 @@ chrome.runtime.onInstalled.addListener(() => {
 
 scheduleAlarm();
 updateBadge();
-
-
 
 
 
