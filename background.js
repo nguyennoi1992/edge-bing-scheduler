@@ -266,7 +266,7 @@ async function injectDomHelpers(tabId) {
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
   await appendDebugLog("info", "rewards", "Rewards phase started");
-  const rewardSectionIds = ["moreactivities", "microsoft", "streaks", "levelup", "global"];
+  const rewardSectionIds = ["moreactivities"];
   const rewardUrls = [
     "https://rewards.bing.com/earn",
     "https://rewards.bing.com/dashboard",
@@ -1182,10 +1182,10 @@ async function autoClickRewards() {
                     isDirectRewardAction
                       ? node
                       :
-                    node.closest("a[href].rounded-cornerCardDefault, button.rounded-cornerCardDefault, [role='button'].rounded-cornerCardDefault, [role='link'].rounded-cornerCardDefault, [data-react-aria-pressable='true'].rounded-cornerCardDefault") ||
-                    node.closest(".rounded-cornerCardDefault") ||
-                    node.closest("[class*='rounded-cornerCardDefault']") ||
-                    node;
+                      node.closest("a[href].rounded-cornerCardDefault, button.rounded-cornerCardDefault, [role='button'].rounded-cornerCardDefault, [role='link'].rounded-cornerCardDefault, [data-react-aria-pressable='true'].rounded-cornerCardDefault") ||
+                      node.closest(".rounded-cornerCardDefault") ||
+                      node.closest("[class*='rounded-cornerCardDefault']") ||
+                      node;
                   if (!card || seen.has(card)) continue;
                   seen.add(card);
                   roots.push(card);
@@ -1443,8 +1443,8 @@ async function autoClickRewards() {
                   isDirectRewardAction
                     ? node
                     :
-                  node.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") ||
-                  node;
+                    node.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") ||
+                    node;
                 if (!card || seen.has(card)) continue;
                 seen.add(card);
                 roots.push(card);
@@ -2161,9 +2161,9 @@ async function autoClickRewards() {
       // unrelated links (redeem, shop, etc.) that aren't reward cards.
       let targetSectionIds = rewardSectionIds;
       if (/rewards\.bing\.com\/earn/i.test(url)) {
-        targetSectionIds = ["moreactivities", "keepearning"];
+        targetSectionIds = ["moreactivities"];
       } else if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        targetSectionIds = ["dailyset", "daily-sets", "dailypointitem", "moreactivities"];
+        targetSectionIds = ["dailyset"];
       }
 
       // Collect all reward cards once, click through each one, then move on.
