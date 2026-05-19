@@ -125,8 +125,8 @@ async function openSidebar() {
 
 async function load() {
   const { enabled, time, nextRunAt } = await chrome.storage.sync.get(["enabled", "time", "nextRunAt"]);
-  document.getElementById("enabled").checked = !!enabled;
-  document.getElementById("time").textContent = time || "—";
+  document.getElementById("enabled").checked = enabled !== false;
+  document.getElementById("time").textContent = time || "01:00";
   document.getElementById("next").textContent = nextRunAt ? formatDate(nextRunAt) : "—";
   await loadLogs();
 
@@ -145,14 +145,14 @@ async function load() {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "sync") {
     if (changes.time) {
-      document.getElementById("time").textContent = changes.time.newValue || "—";
+      document.getElementById("time").textContent = changes.time.newValue || "01:00";
     }
     if (changes.nextRunAt) {
       const v = changes.nextRunAt.newValue;
       document.getElementById("next").textContent = v ? formatDate(v) : "—";
     }
     if (changes.enabled) {
-      document.getElementById("enabled").checked = !!changes.enabled.newValue;
+      document.getElementById("enabled").checked = changes.enabled.newValue !== false;
     }
   }
 

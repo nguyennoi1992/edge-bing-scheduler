@@ -19,6 +19,7 @@ const DEBUG_LOGS_KEY = 'debugLogs';
 const DEBUG_LOG_RETENTION_DAYS = 7;
 const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const KEEPALIVE_ALARM = "keepAlive";
+const DEFAULT_RUN_TIME = "01:00";
 
 // Keep the MV3 service worker alive during active runs
 async function startKeepAlive() {
@@ -49,7 +50,7 @@ async function ensureTabFocused(tabId) {
 
 const DEFAULTS = {
   enabled: true,
-  time: "08:00", // 24h HH:MM
+  time: DEFAULT_RUN_TIME, // 24h HH:MM
   searchesPerRun: 50, // how many queries to open per run
   intervalMin: 10, // min seconds between tabs
   intervalMax: 120, // max seconds between tabs
@@ -152,7 +153,7 @@ function randomDelay(min, max) {
 }
 
 function computeNextRunDate(timeHHMM) {
-  const [hour, minute] = (timeHHMM || "08:00").split(":").map(Number);
+  const [hour, minute] = (timeHHMM || DEFAULT_RUN_TIME).split(":").map(Number);
   const now = new Date();
   const next = new Date();
   next.setHours(hour || 0, minute || 0, 0, 0);
@@ -690,12 +691,15 @@ async function autoClickRewards() {
 
             const key = buildQuestCardKey({ href, text: linkText });
 
-            if (seen.has(key)) continue;
-            seen.add(key);
+            // Dedup by actual href (stable) to avoid re-processing the same quest
+            // when dynamic text like "2/7 tasks" changes to "4/7 tasks" after activities.
+            if (seen.has(href)) continue;
+            seen.add(href);
 
             items.push({
-              href: key,
+              href: key,   // kept for clickQuestCard matching
               key: key,
+              actualHref: href, // stable key for attemptedQuestKeys dedup
             });
           }
 
@@ -816,11 +820,21 @@ async function autoClickRewards() {
           }
           if (!activitiesRoot) return [];
 
-          const activityCards = Array.from(
+          const candidates = Array.from(
             activitiesRoot.querySelectorAll(
-              ".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']",
-            ),
-          ).filter((el) => isVisible(el) && !el.closest("#quests"));
+              "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']"
+            )
+          );
+          
+          const uniqueCards = new Set();
+          const activityCards = [];
+          for (const cand of candidates) {
+            const card = cand.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
+            if (!uniqueCards.has(card) && isVisible(card) && !card.closest("#quests")) {
+              uniqueCards.add(card);
+              activityCards.push(card);
+            }
+          }
           console.log("[Rewards-Debug] getQuestActivities: Found " + activityCards.length + " activity cards inside root. Filtering actionable ones...");
 
           const seen = new Set();
@@ -907,11 +921,21 @@ async function autoClickRewards() {
             }
 
             if (activitiesRoot) {
-              const cards = Array.from(
+              const candidates = Array.from(
                 activitiesRoot.querySelectorAll(
-                  ".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']",
-                ),
-              ).filter((candidate) => isVisible(candidate) && !candidate.closest("#quests"));
+                  "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']"
+                )
+              );
+              
+              const uniqueCards = new Set();
+              const cards = [];
+              for (const cand of candidates) {
+                const card = cand.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
+                if (!uniqueCards.has(card) && isVisible(card) && !card.closest("#quests")) {
+                  uniqueCards.add(card);
+                  cards.push(card);
+                }
+              }
 
               for (const candidate of cards) {
                 const cardText = normalizeRewardText(candidate.innerText || candidate.textContent || "");
@@ -942,7 +966,7 @@ async function autoClickRewards() {
                 if (!isMatchable) continue;
 
                 const targetHrefPart = keyToClick.split("|")[0];
-                if ((targetHrefPart && href && href === targetHrefPart) || candKey === keyToClick) {
+                if ((href && targetHrefPart && href === targetHrefPart && href !== "#" && href !== "/earn") || candKey === keyToClick) {
                   el = candidate;
                   actionEl = target;
                   break;
@@ -1423,13 +1447,11 @@ async function autoClickRewards() {
 
           function findRewardCardRoots(rootNode) {
             const selectors = [
-              ".rounded-cornerCardDefault",
-              "[class*='rounded-cornerCardDefault']",
-              "[data-react-aria-pressable='true']",
               "a[href]",
               "button",
               "[role='button']",
               "[role='link']",
+              "[data-react-aria-pressable='true']",
             ];
             const roots = [];
             const seen = new Set();
@@ -1443,7 +1465,9 @@ async function autoClickRewards() {
                   isDirectRewardAction
                     ? node
                     :
-                    node.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") ||
+                    node.closest("a[href].rounded-cornerCardDefault, button.rounded-cornerCardDefault, [role='button'].rounded-cornerCardDefault, [role='link'].rounded-cornerCardDefault, [data-react-aria-pressable='true'].rounded-cornerCardDefault") ||
+                    node.closest(".rounded-cornerCardDefault") ||
+                    node.closest("[class*='rounded-cornerCardDefault']") ||
                     node;
                 if (!card || seen.has(card)) continue;
                 seen.add(card);
@@ -1462,27 +1486,60 @@ async function autoClickRewards() {
               expandSectionIfCollapsed(section);
             }
             const rootNode = section || document;
-            return findRewardCardRoots(rootNode).filter((card) => {
+            const cardRoots = findRewardCardRoots(rootNode);
+
+            const unique = [];
+            const seen = new Set();
+
+            for (const card of cardRoots) {
               const href =
                 card.getAttribute("href") ||
                 card.querySelector("a[href]")?.getAttribute("href") ||
                 "";
               const text = normalizeRewardText(card.innerText || card.textContent || "");
-              return isActionableRewardCard({
+              const meta = {
                 href,
                 text,
-                hasVisual: !!card.querySelector("img, mee-icon, svg, .mee-icon"),
-                isDisabled: isDisabled(card),
+                hasVisual: !!card.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
+                isDisabled: card.getAttribute("aria-disabled") === "true" || !!card.closest("[aria-disabled='true'], [data-disabled='true']"),
                 isCompleted: isCardCompleted(card),
                 isVisible: isVisible(card),
                 isInNav: !!card.closest("nav, header, footer, [role='banner']"),
                 isQuestCard: !!card.closest("#quests"),
                 isHeader: card.hasAttribute("slot") || card.hasAttribute("aria-controls") || card.hasAttribute("aria-expanded") || !!card.closest("h1, h2, h3, h4") || !!card.querySelector("h1, h2, h3, h4"),
-                isPressable:
-                  !!card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true'], a[href]") ||
-                  !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link'], a[href]"),
-              });
-            });
+                isPressable: card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") || !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
+              };
+
+              if (!isActionableRewardCard(meta)) continue;
+              if (seen.has(card)) continue;
+              seen.add(card);
+              unique.push(card);
+            }
+
+            for (const anchor of rootNode.querySelectorAll("a[href][data-react-aria-pressable='true']")) {
+              if (seen.has(anchor)) continue;
+
+              const href = anchor.getAttribute("href") || "";
+              const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
+              const meta = {
+                href,
+                text,
+                hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
+                isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
+                isCompleted: isCardCompleted(anchor),
+                isVisible: isVisible(anchor),
+                isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
+                isQuestCard: !!anchor.closest("#quests"),
+                isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                isPressable: true,
+              };
+
+              if (!isActionableRewardCard(meta)) continue;
+              seen.add(anchor);
+              unique.push(anchor);
+            }
+
+            return unique;
           }
 
           function buildCardKey(card) {
@@ -1725,7 +1782,13 @@ async function autoClickRewards() {
             const cardsList = (sectionIds || [])
               .map((sectionId) => collectSectionCardsById(sectionId))
               .flat();
-            card = cardsList.find((a) => buildCardKey(a) === keyToClick);
+            card = cardsList.find((a) => {
+              const candKey = buildCardKey(a);
+              const candHref = a.getAttribute("href") || a.querySelector("a[href]")?.getAttribute("href") || "";
+              const targetHrefPart = keyToClick.split("|")[0];
+              return candKey === keyToClick || 
+                (candHref && targetHrefPart && candHref === targetHrefPart && candHref !== "#" && candHref !== "/earn");
+            });
             if (card) break;
             await sleep(800);
           }
@@ -2038,14 +2101,15 @@ async function autoClickRewards() {
           console.log("[Rewards] processRewardUrl: Scanning for quest cards...");
           const questCardsResult = await getQuestCards(tab.id);
           const questCards = Array.isArray(questCardsResult) ? questCardsResult : [];
-          const nextQuest = questCards.find((card) => !attemptedQuestKeys.has(card.key));
+          // Use stable actualHref for dedup so "X/Y tasks" text changes don't re-trigger the same quest
+          const nextQuest = questCards.find((card) => !attemptedQuestKeys.has(card.actualHref || card.key));
 
           if (!nextQuest) {
             console.log("[Rewards] No more quest cards found for " + url);
             break;
           }
 
-          attemptedQuestKeys.add(nextQuest.key);
+          attemptedQuestKeys.add(nextQuest.actualHref || nextQuest.key);
           console.log("[Rewards] Opening quest " + (i + 1) + ": " + nextQuest.href);
           await appendDebugLog("info", "quests", `Opening quest ${i + 1}`, { href: nextQuest.href });
 
@@ -2163,7 +2227,7 @@ async function autoClickRewards() {
       if (/rewards\.bing\.com\/earn/i.test(url)) {
         targetSectionIds = ["moreactivities"];
       } else if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        targetSectionIds = ["dailyset"];
+        targetSectionIds = ["dailyset", "moreactivities"];
       }
 
       // Collect all reward cards once, click through each one, then move on.
@@ -2762,15 +2826,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  scheduleAlarm();
-  updateBadge();
-  ensureRunTicker();
+chrome.runtime.onInstalled.addListener(async () => {
+  const current = await chrome.storage.sync.get(["enabled", "time"]);
+  const updates = {};
+
+  if (current.enabled === undefined) {
+    updates.enabled = DEFAULTS.enabled;
+  }
+  if (!current.time || current.time === "08:00") {
+    updates.time = DEFAULT_RUN_TIME;
+  }
+  if (Object.keys(updates).length) {
+    await chrome.storage.sync.set(updates);
+  }
+
+  await scheduleAlarm();
+  await updateBadge();
+  await ensureRunTicker();
 });
 
 scheduleAlarm();
 updateBadge();
-
 
 
 

@@ -11,7 +11,7 @@ const els = {
 
 const DEFAULTS = {
   enabled: true,
-  time: "08:00",
+  time: "01:00",
   searchesPerRun: 50,        
   intervalMin: 10,           
   intervalMax: 120,          
