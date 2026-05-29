@@ -2253,6 +2253,7 @@ async function autoClickRewards() {
 
         const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
         const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
+        const resultHref = typeof clickResult === "object" ? clickResult.href : "";
 
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
@@ -2264,14 +2265,17 @@ async function autoClickRewards() {
           .filter((id) => !baselineTabIds.has(id))
           .filter((id) => id !== tab.id);
 
-        if (newTabIds.length === 0 && wasClicked && card.href) {
-          let fullHref = card.href;
+        if (newTabIds.length === 0 && (card.href || resultHref)) {
+          let fullHref = resultHref || card.href;
           if (fullHref.startsWith("/")) {
             fullHref = "https://rewards.bing.com" + fullHref;
           }
           if (fullHref.startsWith("http")) {
-            await appendDebugLog("warn", "quests", "DOM click failed, falling back to manual open", { url: fullHref });
-            console.log("[Rewards] DOM click failed to open new tab, falling back to manual open: " + fullHref);
+            await appendDebugLog("warn", "rewards", "Reward card did not open a child tab, falling back to manual open", {
+              url: fullHref,
+              clicked: wasClicked,
+            });
+            console.log("[Rewards] Reward card did not open a child tab, falling back to manual open: " + fullHref);
             try {
               const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId });
               newTabIds.push(fallbackTab.id);
@@ -2287,7 +2291,17 @@ async function autoClickRewards() {
           try {
             await chrome.tabs.update(childTabId, { active: true });
             await waitForTabComplete(childTabId);
-            await humanScrollOnTab(childTabId);
+            const quizResult = await handleRewardChildTab(childTabId);
+            if (quizResult?.handled) {
+              await appendDebugLog("info", "rewards", "Handled reward quiz child tab", {
+                completed: quizResult.completed,
+                clicks: quizResult.clicks,
+                reason: quizResult.reason,
+              });
+              await new Promise((r) => setTimeout(r, 2000));
+            } else {
+              await humanScrollOnTab(childTabId);
+            }
           } catch { }
         }
 
@@ -2847,7 +2861,6 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 scheduleAlarm();
 updateBadge();
-
 
 
 
