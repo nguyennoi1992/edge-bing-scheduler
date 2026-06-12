@@ -20,6 +20,18 @@ const DEBUG_LOG_RETENTION_DAYS = 7;
 const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const KEEPALIVE_ALARM = "keepAlive";
 const DEFAULT_RUN_TIME = "01:00";
+const INTERNET_RETRY_ALARM = "internetRetry";
+const EARLY_INTERNET_CHECK_ALARM = "earlyInternetCheck";
+const INTERNET_RETRY_MINUTES = 1;
+const EARLY_CHECK_START_HOUR = 1;
+const EARLY_CHECK_END_HOUR = 5;
+const LAST_SUCCESSFUL_RUN_DATE_KEY = "lastSuccessfulRunDate";
+const INTERNET_CHECK_URLS = [
+  "https://www.bing.com/favicon.ico",
+  "https://www.google.com/generate_204",
+  "https://www.cloudflare.com/cdn-cgi/trace",
+];
+const INTERNET_CHECK_TIMEOUT_MS = 10000;
 
 // Keep the MV3 service worker alive during active runs
 async function startKeepAlive() {
@@ -159,6 +171,100 @@ function computeNextRunDate(timeHHMM) {
   next.setHours(hour || 0, minute || 0, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
   return next;
+}
+
+function getLocalDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+async function hasRunToday() {
+  const today = getLocalDateKey();
+  const data = await chrome.storage.local.get(LAST_SUCCESSFUL_RUN_DATE_KEY);
+  return data[LAST_SUCCESSFUL_RUN_DATE_KEY] === today;
+}
+
+async function markRunCompletedToday() {
+  await chrome.storage.local.set({
+    [LAST_SUCCESSFUL_RUN_DATE_KEY]: getLocalDateKey(),
+  });
+}
+
+function computeNextEarlyInternetCheckDate(now = new Date()) {
+  const next = new Date(now);
+  next.setMinutes(0, 0, 0);
+
+  if (now.getHours() < EARLY_CHECK_START_HOUR) {
+    next.setHours(EARLY_CHECK_START_HOUR, 0, 0, 0);
+    return next;
+  }
+
+  if (now.getHours() <= EARLY_CHECK_END_HOUR) {
+    if (next <= now) next.setHours(next.getHours() + 1, 0, 0, 0);
+    if (next.getHours() <= EARLY_CHECK_END_HOUR) return next;
+  }
+
+  next.setDate(next.getDate() + 1);
+  next.setHours(EARLY_CHECK_START_HOUR, 0, 0, 0);
+  return next;
+}
+
+async function isInternetAvailable() {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    return false;
+  }
+
+  const failures = [];
+  for (const url of INTERNET_CHECK_URLS) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), INTERNET_CHECK_TIMEOUT_MS);
+    try {
+      await fetch(url, {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      return true;
+    } catch (e) {
+      failures.push(`${url}: ${e?.message || e}`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  console.warn("[Internet] Connectivity check failed:", failures.join("; "));
+  return false;
+}
+
+async function scheduleInternetRetry(reason = "unknown") {
+  const when = Date.now() + INTERNET_RETRY_MINUTES * 60 * 1000;
+  await chrome.alarms.create(INTERNET_RETRY_ALARM, { when });
+  await appendDebugLog("warn", "internet", "Internet unavailable; retry scheduled", {
+    reason,
+    retryAt: when,
+  });
+}
+
+async function clearInternetRetry() {
+  await chrome.alarms.clear(INTERNET_RETRY_ALARM);
+}
+
+function createInternetUnavailableError(context) {
+  const err = new Error(`Internet unavailable during ${context}`);
+  err.name = "InternetUnavailableError";
+  return err;
+}
+
+function isInternetUnavailableError(err) {
+  return err?.name === "InternetUnavailableError";
+}
+
+async function ensureInternetOrThrow(context) {
+  if (await isInternetAvailable()) return;
+  await appendDebugLog("error", "internet", "Internet unavailable", { context });
+  throw createInternetUnavailableError(context);
 }
 
 function getQueryList(cfg) {
@@ -2673,16 +2779,6 @@ async function runTask() {
   const cfg = await getConfig();
   if (!cfg.enabled) return;
 
-  // 1. First run rewards auto-click
-  await autoClickRewards();
-  await appendDebugLog("success", "rewards", "Rewards phase completed");
-
-  await appendDebugLog("info", "search", "Search phase started");
-
-  // 2. Then continue with Bing searches — use awaited loop so the
-  //    service worker keepalive stays active until every search finishes.
-  const queries = getQueryList(cfg);
-
   await chrome.storage.sync.set({
     running: true,
     runEndsAt: null,
@@ -2691,55 +2787,80 @@ async function runTask() {
   await updateBadge();
   await ensureRunTicker();
 
-  for (let idx = 0; idx < queries.length; idx++) {
-    const delaySecs = randomDelay(cfg.intervalMin, cfg.intervalMax);
-    const nextOpenAt = Date.now() + delaySecs * 1000;
-    await chrome.storage.sync.set({ nextOpenAt });
-    await updateBadge();
-
-    // Wait for the random delay before opening the next search
-    await new Promise((r) => setTimeout(r, delaySecs * 1000));
-
-    await appendDebugLog("info", "search", "Search opened", {
-      query: queries[idx],
-      index: idx + 1,
-      total: queries.length,
-    });
-    await openBingAndType(queries[idx]);
-
-    // Simulate human browsing on ~60% of searches (vary behavior)
-    if (singletonTabId && Math.random() < 0.6) {
-      try {
-        await humanBrowseSearchResults(singletonTabId);
-      } catch { }
-    }
-  }
-
-  await chrome.storage.sync.set({ nextOpenAt: null });
-  await appendDebugLog("success", "search", "Search phase completed", {
-    totalQueries: queries.length,
-  });
-
-  // 3. Final sweep for rewards (second pass)
-  console.log("⚡ Running second pass for Bing Rewards auto click...");
-  await appendDebugLog("info", "rewards", "Second Rewards phase started");
   try {
-    await autoClickRewards();
-    await appendDebugLog("success", "rewards", "Second Rewards phase completed");
-  } catch (e) {
-    console.warn("[Rewards] Second pass failed:", e);
-    await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
-  }
+    await ensureInternetOrThrow("run_start");
 
-  await chrome.storage.sync.set({
-    running: false,
-    runEndsAt: null,
-    nextOpenAt: null,
-  });
-  // Reset window pinning for next run
-  singletonWindowId = null;
-  await updateBadge();
-  await ensureRunTicker();
+    // 1. First run rewards auto-click
+    await autoClickRewards();
+    await ensureInternetOrThrow("rewards_first_pass");
+    await appendDebugLog("success", "rewards", "Rewards phase completed");
+
+    await appendDebugLog("info", "search", "Search phase started");
+
+    // 2. Then continue with Bing searches — use awaited loop so the
+    //    service worker keepalive stays active until every search finishes.
+    const queries = getQueryList(cfg);
+
+    for (let idx = 0; idx < queries.length; idx++) {
+      await ensureInternetOrThrow(`search_${idx + 1}_before_delay`);
+
+      const delaySecs = randomDelay(cfg.intervalMin, cfg.intervalMax);
+      const nextOpenAt = Date.now() + delaySecs * 1000;
+      await chrome.storage.sync.set({ nextOpenAt });
+      await updateBadge();
+
+      // Wait for the random delay before opening the next search
+      await new Promise((r) => setTimeout(r, delaySecs * 1000));
+      await ensureInternetOrThrow(`search_${idx + 1}_before_open`);
+
+      await appendDebugLog("info", "search", "Search opened", {
+        query: queries[idx],
+        index: idx + 1,
+        total: queries.length,
+      });
+      await openBingAndType(queries[idx]);
+
+      // Simulate human browsing on ~60% of searches (vary behavior)
+      if (singletonTabId && Math.random() < 0.6) {
+        try {
+          await humanBrowseSearchResults(singletonTabId);
+        } catch { }
+      }
+
+      await ensureInternetOrThrow(`search_${idx + 1}_after_open`);
+    }
+
+    await chrome.storage.sync.set({ nextOpenAt: null });
+    await appendDebugLog("success", "search", "Search phase completed", {
+      totalQueries: queries.length,
+    });
+
+    // 3. Final sweep for rewards (second pass)
+    console.log("⚡ Running second pass for Bing Rewards auto click...");
+    await appendDebugLog("info", "rewards", "Second Rewards phase started");
+    try {
+      await ensureInternetOrThrow("rewards_second_pass_before");
+      await autoClickRewards();
+      await ensureInternetOrThrow("rewards_second_pass_after");
+      await appendDebugLog("success", "rewards", "Second Rewards phase completed");
+    } catch (e) {
+      if (isInternetUnavailableError(e)) throw e;
+      console.warn("[Rewards] Second pass failed:", e);
+      await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
+    }
+
+    await markRunCompletedToday();
+  } finally {
+    await chrome.storage.sync.set({
+      running: false,
+      runEndsAt: null,
+      nextOpenAt: null,
+    });
+    // Reset window pinning for next run
+    singletonWindowId = null;
+    await updateBadge();
+    await ensureRunTicker();
+  }
 }
 
 async function startRun(source = "unknown") {
@@ -2750,13 +2871,26 @@ async function startRun(source = "unknown") {
   }
   runPromise = (async () => {
     try {
+      const cfg = await getConfig();
+      if (!cfg.enabled) return;
+      if (source !== "run_now" && await hasRunToday()) {
+        console.log(`[Run] Skip ${source}; already completed today.`);
+        await appendDebugLog("info", "run", "Run skipped because today is already complete", { source });
+        return;
+      }
+
       console.log(`[Run] Started from ${source}`);
       await appendDebugLog("info", "run", "Run started", { source });
       await startKeepAlive();
+      await ensureInternetOrThrow("before_run");
+      await clearInternetRetry();
       await runTask();
     } catch (e) {
       console.error(`[Run] Failed from ${source}:`, e);
       await appendDebugLog("error", "run", "Run failed", { source, error: String(e) });
+      if (isInternetUnavailableError(e) && !await hasRunToday()) {
+        await scheduleInternetRetry(source);
+      }
     } finally {
       await stopKeepAlive();
       runPromise = null;
@@ -2773,6 +2907,8 @@ async function scheduleAlarm() {
   await chrome.alarms.clear(ALARM_NAME);
 
   if (!cfg.enabled) {
+    await clearInternetRetry();
+    await chrome.alarms.clear(EARLY_INTERNET_CHECK_ALARM);
     await chrome.storage.sync.set({ nextRunAt: null });
     await updateBadge();
     return;
@@ -2785,6 +2921,48 @@ async function scheduleAlarm() {
   console.log("Next run scheduled at:", next.toString());
 }
 
+async function scheduleEarlyInternetCheck() {
+  const cfg = await getConfig();
+  await chrome.alarms.clear(EARLY_INTERNET_CHECK_ALARM);
+
+  if (!cfg.enabled) return;
+
+  const next = computeNextEarlyInternetCheckDate();
+  await chrome.alarms.create(EARLY_INTERNET_CHECK_ALARM, { when: next.getTime() });
+  console.log("Next early internet check scheduled at:", next.toString());
+}
+
+async function handleInternetRetry() {
+  const cfg = await getConfig();
+  if (!cfg.enabled || await hasRunToday()) {
+    await clearInternetRetry();
+    return;
+  }
+
+  if (await isInternetAvailable()) {
+    await clearInternetRetry();
+    await startRun("internet_retry");
+    await scheduleAlarm();
+    await scheduleEarlyInternetCheck();
+    return;
+  }
+
+  await scheduleInternetRetry("retry_check");
+}
+
+async function handleEarlyInternetCheck() {
+  const cfg = await getConfig();
+  if (!cfg.enabled || await hasRunToday()) return;
+
+  if (await isInternetAvailable()) {
+    await startRun("early_internet_check");
+    await scheduleAlarm();
+    return;
+  }
+
+  await scheduleInternetRetry("early_internet_check");
+}
+
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
     // No-op ping to prevent MV3 service worker from being terminated
@@ -2793,6 +2971,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_NAME) {
     await startRun("alarm");
     await scheduleAlarm();
+    await scheduleEarlyInternetCheck();
+    return;
+  }
+  if (alarm.name === INTERNET_RETRY_ALARM) {
+    await handleInternetRetry();
+    return;
+  }
+  if (alarm.name === EARLY_INTERNET_CHECK_ALARM) {
+    await handleEarlyInternetCheck();
+    await scheduleEarlyInternetCheck();
   }
 });
 
@@ -2808,6 +2996,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   ];
   if (relevant.some((k) => k in changes)) {
     scheduleAlarm();
+    scheduleEarlyInternetCheck();
   }
   if (
     "nextRunAt" in changes ||
@@ -2821,7 +3010,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "RESCHEDULE") {
-    scheduleAlarm()
+    Promise.all([scheduleAlarm(), scheduleEarlyInternetCheck()])
       .then(() => sendResponse?.({ ok: true }))
       .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
     return true;
@@ -2855,18 +3044,13 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 
   await scheduleAlarm();
+  await scheduleEarlyInternetCheck();
   await updateBadge();
   await ensureRunTicker();
 });
 
 scheduleAlarm();
+scheduleEarlyInternetCheck();
 updateBadge();
-
-
-
-
-
-
-
 
 

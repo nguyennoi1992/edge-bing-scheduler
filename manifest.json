@@ -14,7 +14,9 @@
   ],
   "host_permissions": [
     "https://www.bing.com/*",
-    "https://rewards.bing.com/*"
+    "https://rewards.bing.com/*",
+    "https://www.google.com/*",
+    "https://www.cloudflare.com/*"
   ],
   "background": {
     "service_worker": "background.js",
