@@ -1230,7 +1230,7 @@ async function autoClickRewards() {
   }
 
   async function getRewardCards(tabId, targetSectionIds) {
-    const [{ result: rewardCards = [] } = {}] =
+    const [{ result: scanResult = { cards: [], debug: [] } } = {}] =
       await chrome.scripting.executeScript({
         target: { tabId },
         world: "MAIN",
@@ -1292,6 +1292,24 @@ async function autoClickRewards() {
               return false;
             }
 
+            function getRewardRejectReasons(meta) {
+              const href = meta.href || "";
+              const text = normalizeRewardText(meta.text).toLowerCase();
+              const reasons = [];
+              if (meta.isVisible === false) reasons.push("not_visible");
+              if (meta.isDisabled) reasons.push("disabled");
+              if (meta.isCompleted) reasons.push("completed");
+              if (meta.isInNav) reasons.push("in_nav");
+              if (meta.isQuestCard) reasons.push("quest_card");
+              if (!meta.hasVisual) reasons.push("no_visual");
+              if (!text) reasons.push("no_text");
+              if (!href && !meta.isPressable) reasons.push("no_href_or_pressable");
+              if (meta.isHeader) reasons.push("header");
+              if (href === "/earn") reasons.push("earn_link");
+              if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) reasons.push("nav_button");
+              return reasons;
+            }
+
             function findRewardCardRoots(rootNode) {
               const selectors = [
                 "a[href]",
@@ -1325,15 +1343,32 @@ async function autoClickRewards() {
               return roots;
             }
 
-            function collectSectionCardsById(sectionId) {
+            function collectSectionCardsById(sectionId, debugSections) {
               let section = null;
+              const sectionDebug = {
+                sectionId,
+                exists: true,
+                directRoundedAnchors: 0,
+                cardRoots: 0,
+                accepted: 0,
+                rejected: [],
+              };
+              debugSections.push(sectionDebug);
+
               if (sectionId !== "global") {
                 section = document.querySelector(`#${sectionId}`);
-                if (!section) return [];
+                if (!section) {
+                  sectionDebug.exists = false;
+                  return [];
+                }
                 expandSectionIfCollapsed(section);
               }
               const rootNode = section || document;
+              sectionDebug.directRoundedAnchors = rootNode.querySelectorAll(
+                "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
+              ).length;
               const cardRoots = findRewardCardRoots(rootNode);
+              sectionDebug.cardRoots = cardRoots.length;
 
               const unique = [];
               const seen = new Set();
@@ -1362,12 +1397,30 @@ async function autoClickRewards() {
                 if (!isActionable) {
                   // Debug logging to find out WHY the card was rejected
                   console.log(`[Rewards-Debug] Card rejected. href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}... Meta:`, JSON.stringify(meta));
+                  if (sectionDebug.rejected.length < 8) {
+                    sectionDebug.rejected.push({
+                      href: href.substring(0, 100),
+                      text: text.substring(0, 100),
+                      reasons: getRewardRejectReasons(meta),
+                      meta: {
+                        hasVisual: meta.hasVisual,
+                        isCompleted: meta.isCompleted,
+                        isVisible: meta.isVisible,
+                        isHeader: meta.isHeader,
+                        isInNav: meta.isInNav,
+                        isQuestCard: meta.isQuestCard,
+                        isPressable: meta.isPressable,
+                        isDisabled: meta.isDisabled,
+                      },
+                    });
+                  }
                   continue;
                 }
 
                 if (seen.has(key)) continue;
                 seen.add(key);
                 unique.push(card);
+                sectionDebug.accepted++;
                 console.log(`[Rewards-Debug] Card accepted! href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}...`);
               }
 
@@ -1390,12 +1443,32 @@ async function autoClickRewards() {
                   isPressable: true,
                 };
 
-                if (!isActionableRewardCard(meta)) continue;
+                if (!isActionableRewardCard(meta)) {
+                  if (sectionDebug.rejected.length < 8) {
+                    sectionDebug.rejected.push({
+                      href: href.substring(0, 100),
+                      text: text.substring(0, 100),
+                      reasons: getRewardRejectReasons(meta),
+                      meta: {
+                        hasVisual: meta.hasVisual,
+                        isCompleted: meta.isCompleted,
+                        isVisible: meta.isVisible,
+                        isHeader: meta.isHeader,
+                        isInNav: meta.isInNav,
+                        isQuestCard: meta.isQuestCard,
+                        isPressable: meta.isPressable,
+                        isDisabled: meta.isDisabled,
+                      },
+                    });
+                  }
+                  continue;
+                }
                 if (seen.has(key)) continue;
 
                 seen.add(anchor);
                 seen.add(key);
                 unique.push(anchor);
+                sectionDebug.accepted++;
                 console.log(`[Rewards-Debug] Direct pressable anchor accepted! href: ${href.substring(0, 40)}... text: ${text.substring(0, 40)}...`);
               }
 
@@ -1452,13 +1525,16 @@ async function autoClickRewards() {
             const pollMs = 1500;
             let prevCount = -1;
             let stableRounds = 0;
+            let lastDebug = [];
 
             const timer = setInterval(() => {
               attempts++;
+              const debug = [];
               const sectionCards = (sectionIds || [])
-                .map((sectionId) => collectSectionCardsById(sectionId))
+                .map((sectionId) => collectSectionCardsById(sectionId, debug))
                 .flat();
               const cards = collectCards(sectionCards);
+              lastDebug = debug;
 
               // Wait for card count to stabilize (2 consecutive same counts)
               if (cards.length === prevCount) {
@@ -1474,12 +1550,20 @@ async function autoClickRewards() {
                 console.log(
                   `[Rewards] Actionable cards found across sections: ${cards.length} (from ${sectionCards.length} section cards, after ${attempts} polls)`,
                 );
-                resolve(cards);
+                resolve({ cards, debug: lastDebug, attempts });
               }
             }, pollMs);
           });
         },
       });
+    const rewardCards = Array.isArray(scanResult) ? scanResult : scanResult?.cards;
+    const debug = Array.isArray(scanResult?.debug) ? scanResult.debug : [];
+    await appendDebugLog("info", "rewards", "Reward card scan diagnostics", {
+      tabId,
+      sections: debug,
+      attempts: scanResult?.attempts,
+      cards: Array.isArray(rewardCards) ? rewardCards.length : 0,
+    });
     return Array.isArray(rewardCards) ? rewardCards : [];
   }
 
@@ -3052,5 +3136,4 @@ chrome.runtime.onInstalled.addListener(async () => {
 scheduleAlarm();
 scheduleEarlyInternetCheck();
 updateBadge();
-
 
