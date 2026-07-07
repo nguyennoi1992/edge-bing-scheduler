@@ -613,46 +613,6 @@ async function autoClickRewards() {
     }
   }
 
-  async function closeNewRewardTabs(
-    baselineTabIds,
-    excludeTabIds = [],
-    rounds = 4,
-    delayMs = 1200,
-    windowId = undefined,
-  ) {
-    const rewardLikeUrl =
-      /(rewards\.bing\.com|bing\.com|msn\.com|microsoft\.com\/rewards)/i;
-    const exclude = new Set(
-      (excludeTabIds || []).filter((id) => Number.isInteger(id)),
-    );
-
-    for (let i = 0; i < rounds; i++) {
-      const queryOpts = windowId ? { windowId } : {};
-      const allTabs = await chrome.tabs.query(queryOpts);
-      const candidateIds = allTabs
-        .filter((t) => Number.isInteger(t.id))
-        .filter((t) => !baselineTabIds.has(t.id))
-        .filter((t) => !exclude.has(t.id))
-        .filter((t) => rewardLikeUrl.test(t.url || t.pendingUrl || ""))
-        .map((t) => t.id);
-
-      if (candidateIds.length) {
-        try {
-          await chrome.tabs.remove(candidateIds);
-          console.log(
-            `[Rewards] Closed ${candidateIds.length} new reward tab(s)`,
-          );
-        } catch (e) {
-          console.warn("[Rewards] Failed closing new reward tab(s):", e);
-        }
-      }
-
-      if (i < rounds - 1) {
-        await new Promise((r) => setTimeout(r, delayMs));
-      }
-    }
-  }
-
   /**
    * Inject human-like scroll behaviour into a child tab so Bing registers the visit.
    * Scrolls down in random increments with random pauses, then scrolls back up partially.
@@ -753,6 +713,24 @@ async function autoClickRewards() {
       console.log(`[Rewards] Human scroll completed on tab ${tabId}`);
     } catch (e) {
       console.warn(`[Rewards] Human scroll failed on tab ${tabId}:`, e?.message || e);
+    }
+  }
+
+  async function waitForRewardSearchCredit(tabId, waitMs = 12000) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      const url = tab?.url || "";
+      if (!/https:\/\/www\.bing\.com\/search/i.test(url)) return;
+
+      await appendDebugLog("info", "rewards", "Waiting for Bing search reward credit", {
+        url: url.substring(0, 120),
+        waitMs,
+      });
+      await chrome.tabs.update(tabId, { active: true });
+      await ensureTabFocused(tabId);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    } catch (e) {
+      console.warn("[Rewards] Failed while waiting for search reward credit:", e?.message || e);
     }
   }
 
@@ -1478,6 +1456,77 @@ async function autoClickRewards() {
               return unique;
             }
 
+            function isDashboardRewardHref(href) {
+              return /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|crea=ML2G76|wqoskey=)/i.test(href || "");
+            }
+
+            function collectDashboardFallbackCards(debugSections) {
+              const sectionDebug = {
+                sectionId: "dashboard_fallback",
+                exists: true,
+                directRoundedAnchors: document.querySelectorAll(
+                  "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
+                ).length,
+                cardRoots: 0,
+                accepted: 0,
+                rejected: [],
+              };
+              debugSections.push(sectionDebug);
+
+              const anchors = Array.from(
+                document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
+              ).filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
+              sectionDebug.cardRoots = anchors.length;
+
+              const unique = [];
+              const seen = new Set();
+              for (const anchor of anchors) {
+                const href = anchor.getAttribute("href") || "";
+                const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
+                const key = buildRewardCardKey({ href, text });
+                const meta = {
+                  href,
+                  text,
+                  hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
+                  isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
+                  isCompleted: isCardCompleted(anchor),
+                  isVisible: isVisible(anchor),
+                  isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
+                  isQuestCard: !!anchor.closest("#quests"),
+                  isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                  isPressable: true,
+                };
+
+                if (!isActionableRewardCard(meta)) {
+                  if (sectionDebug.rejected.length < 8) {
+                    sectionDebug.rejected.push({
+                      href: href.substring(0, 100),
+                      text: text.substring(0, 100),
+                      reasons: getRewardRejectReasons(meta),
+                      meta: {
+                        hasVisual: meta.hasVisual,
+                        isCompleted: meta.isCompleted,
+                        isVisible: meta.isVisible,
+                        isHeader: meta.isHeader,
+                        isInNav: meta.isInNav,
+                        isQuestCard: meta.isQuestCard,
+                        isPressable: meta.isPressable,
+                        isDisabled: meta.isDisabled,
+                      },
+                    });
+                  }
+                  continue;
+                }
+
+                if (seen.has(key)) continue;
+                seen.add(key);
+                unique.push(anchor);
+                sectionDebug.accepted++;
+              }
+
+              return unique;
+            }
+
             function buildCardKey(card) {
               const href =
                 card?.href ||
@@ -1533,6 +1582,13 @@ async function autoClickRewards() {
               const sectionCards = (sectionIds || [])
                 .map((sectionId) => collectSectionCardsById(sectionId, debug))
                 .flat();
+              if (
+                sectionCards.length === 0 &&
+                (sectionIds || []).includes("dailyset") &&
+                /rewards\.bing\.com\/dashboard/i.test(location.href)
+              ) {
+                sectionCards.push(...collectDashboardFallbackCards(debug));
+              }
               const cards = collectCards(sectionCards);
               lastDebug = debug;
 
@@ -1726,6 +1782,43 @@ async function autoClickRewards() {
 
               if (!isActionableRewardCard(meta)) continue;
               seen.add(anchor);
+              unique.push(anchor);
+            }
+
+            return unique;
+          }
+
+          function isDashboardRewardHref(href) {
+            return /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|crea=ML2G76|wqoskey=)/i.test(href || "");
+          }
+
+          function collectDashboardFallbackCards() {
+            const anchors = Array.from(
+              document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
+            ).filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
+
+            const unique = [];
+            const seen = new Set();
+            for (const anchor of anchors) {
+              const href = anchor.getAttribute("href") || "";
+              const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
+              const meta = {
+                href,
+                text,
+                hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
+                isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
+                isCompleted: isCardCompleted(anchor),
+                isVisible: isVisible(anchor),
+                isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
+                isQuestCard: !!anchor.closest("#quests"),
+                isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                isPressable: true,
+              };
+
+              if (!isActionableRewardCard(meta)) continue;
+              const key = buildCardKey(anchor);
+              if (seen.has(key)) continue;
+              seen.add(key);
               unique.push(anchor);
             }
 
@@ -1972,6 +2065,13 @@ async function autoClickRewards() {
             const cardsList = (sectionIds || [])
               .map((sectionId) => collectSectionCardsById(sectionId))
               .flat();
+            if (
+              cardsList.length === 0 &&
+              (sectionIds || []).includes("dailyset") &&
+              /rewards\.bing\.com\/dashboard/i.test(location.href)
+            ) {
+              cardsList.push(...collectDashboardFallbackCards());
+            }
             card = cardsList.find((a) => {
               const candKey = buildCardKey(a);
               const candHref = a.getAttribute("href") || a.querySelector("a[href]")?.getAttribute("href") || "";
@@ -2235,13 +2335,69 @@ async function autoClickRewards() {
     const tab = await chrome.tabs.create({ url, active: true, windowId });
     await ensureTabFocused(tab.id);
     const spawnedTabIds = new Set();
+    const processedChildTabIds = new Set();
     const onCreated = (createdTab) => {
-      // Only track tabs spawned in our window
-      if (Number.isInteger(createdTab.id) && createdTab.windowId === windowId) {
+      // Only track tabs opened by the automation tab. User-created tabs in the
+      // same window must not be treated as reward child tabs.
+      if (
+        Number.isInteger(createdTab.id) &&
+        createdTab.windowId === windowId &&
+        createdTab.openerTabId === tab.id
+      ) {
         spawnedTabIds.add(createdTab.id);
       }
     };
     chrome.tabs.onCreated.addListener(onCreated);
+
+    const getCurrentTabIdSet = async () => {
+      const tabs = await chrome.tabs.query({ windowId });
+      return new Set(tabs.map((t) => t.id).filter((id) => Number.isInteger(id)));
+    };
+
+    const collectNewChildTabIds = async (perClickBaselineIds) => {
+      const currentTabs = await chrome.tabs.query({ windowId });
+      return currentTabs
+        .filter((t) => Number.isInteger(t.id))
+        .filter((t) => t.id !== tab.id)
+        .filter((t) => !perClickBaselineIds.has(t.id))
+        .filter((t) => !processedChildTabIds.has(t.id))
+        .filter((t) => spawnedTabIds.has(t.id) || t.openerTabId === tab.id)
+        .map((t) => t.id);
+    };
+
+    const trackFallbackChildTab = (createdTab, childTabIds) => {
+      if (!Number.isInteger(createdTab?.id)) return;
+      spawnedTabIds.add(createdTab.id);
+      if (!childTabIds.includes(createdTab.id)) {
+        childTabIds.push(createdTab.id);
+      }
+    };
+
+    const markChildTabsProcessed = (childTabIds) => {
+      for (const childTabId of childTabIds) {
+        if (Number.isInteger(childTabId)) processedChildTabIds.add(childTabId);
+      }
+    };
+
+    const closeExistingTabs = async (tabIds, label) => {
+      const existingTabIds = [];
+      for (const tabIdToClose of tabIds) {
+        try {
+          await chrome.tabs.get(tabIdToClose);
+          existingTabIds.push(tabIdToClose);
+        } catch {
+          // User may have closed it manually.
+        }
+      }
+
+      if (!existingTabIds.length) return;
+      try {
+        await chrome.tabs.remove(existingTabIds);
+        console.log(`[Rewards] Closed ${existingTabIds.length} ${label}`);
+      } catch (e) {
+        console.warn(`[Rewards] Failed closing ${label}:`, e);
+      }
+    };
 
     try {
       await waitForTabComplete(tab.id);
@@ -2347,18 +2503,14 @@ async function autoClickRewards() {
               ")",
             );
 
+            const childBaselineIds = await getCurrentTabIdSet();
             const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
             const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
             const targetHref = typeof clickResult === "object" ? clickResult.href : null;
 
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
-            const currentTabs = await chrome.tabs.query({ windowId });
-            let newTabIds = currentTabs
-              .map((t) => t.id)
-              .filter((id) => Number.isInteger(id))
-              .filter((id) => !baselineTabIds.has(id))
-              .filter((id) => id !== tab.id);
+            let newTabIds = await collectNewChildTabIds(childBaselineIds);
 
             // Fallback: If no new tab opened, but we have a valid href, manually open it to register the punch
             if (newTabIds.length === 0 && wasClicked && (targetHref || nextActivity.href)) {
@@ -2371,8 +2523,8 @@ async function autoClickRewards() {
                 console.log("[Rewards] DOM click failed to open new tab, falling back to manual open: " + fullHref);
                 try {
                   // MUST be active: true so Bing's tracking script on the search page fires!
-                  const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId });
-                  newTabIds.push(fallbackTab.id);
+                  const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId, openerTabId: tab.id });
+                  trackFallbackChildTab(fallbackTab, newTabIds);
                   await waitForTabComplete(fallbackTab.id);
                 } catch (e) {
                   console.warn("[Rewards] Fallback tab creation failed:", e);
@@ -2391,14 +2543,8 @@ async function autoClickRewards() {
             }
 
             if (newTabIds.length) {
-              try {
-                await chrome.tabs.remove(newTabIds);
-                console.log(
-                  "[Rewards] Closed " + newTabIds.length + " quest activity tab(s)",
-                );
-              } catch (e) {
-                console.warn("[Rewards] Failed closing quest activity tab(s):", e);
-              }
+              markChildTabsProcessed(newTabIds);
+              await closeExistingTabs(newTabIds, "quest activity tab(s)");
             }
           }
 
@@ -2441,19 +2587,16 @@ async function autoClickRewards() {
           href: card.href.substring(0, 80),
         });
 
+        const childBaselineIds = await getCurrentTabIdSet();
         const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
         const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
         const resultHref = typeof clickResult === "object" ? clickResult.href : "";
 
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
-        // Collect and scroll child tabs that were spawned before closing
-        const currentTabs = await chrome.tabs.query({ windowId });
-        const newTabIds = currentTabs
-          .map((t) => t.id)
-          .filter((id) => Number.isInteger(id))
-          .filter((id) => !baselineTabIds.has(id))
-          .filter((id) => id !== tab.id);
+        // Collect only child tabs spawned by this card click. A card can open
+        // more than one tab, and the user may close one manually while we run.
+        const newTabIds = await collectNewChildTabIds(childBaselineIds);
 
         if (newTabIds.length === 0 && (card.href || resultHref)) {
           let fullHref = resultHref || card.href;
@@ -2467,8 +2610,8 @@ async function autoClickRewards() {
             });
             console.log("[Rewards] Reward card did not open a child tab, falling back to manual open: " + fullHref);
             try {
-              const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId });
-              newTabIds.push(fallbackTab.id);
+              const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId, openerTabId: tab.id });
+              trackFallbackChildTab(fallbackTab, newTabIds);
               await waitForTabComplete(fallbackTab.id);
             } catch (e) {
               console.warn("[Rewards] Fallback tab creation failed:", e);
@@ -2491,18 +2634,15 @@ async function autoClickRewards() {
               await new Promise((r) => setTimeout(r, 2000));
             } else {
               await humanScrollOnTab(childTabId);
+              await waitForRewardSearchCredit(childTabId);
             }
           } catch { }
         }
 
         // Close child tabs after scrolling
         if (newTabIds.length) {
-          try {
-            await chrome.tabs.remove(newTabIds);
-            console.log(`[Rewards] Closed ${newTabIds.length} child tab(s) from card ${i + 1}`);
-          } catch (e) {
-            console.warn("[Rewards] Failed closing child tab(s):", e);
-          }
+          markChildTabsProcessed(newTabIds);
+          await closeExistingTabs(newTabIds, `child tab(s) from card ${i + 1}`);
         }
 
         console.log(`[Rewards] Card ${i + 1}/${rewardCards.length} done (clicked=${wasClicked}, childTabs=${newTabIds.length})`);
@@ -2525,23 +2665,12 @@ async function autoClickRewards() {
       chrome.tabs.onCreated.removeListener(onCreated);
       if (tab.id) {
         if (spawnedTabIds.size) {
-          try {
-            const idsToClose = [...spawnedTabIds].filter((id) => id !== tab.id);
-            if (idsToClose.length) {
-              await chrome.tabs.remove(idsToClose);
-            }
-            console.log(
-              `[Rewards] Closed ${idsToClose.length} tracked spawned tab(s) from ${url}`,
-            );
-          } catch (e) {
-            console.warn(
-              `[Rewards] Failed closing tracked spawned tab(s) from ${url}:`,
-              e,
-            );
-          }
+          const idsToClose = [...spawnedTabIds].filter(
+            (id) => id !== tab.id && !processedChildTabIds.has(id),
+          );
+          await closeExistingTabs(idsToClose, `tracked spawned tab(s) from ${url}`);
         }
         await closeChildTabs(tab.id, 4, 1200, windowId);
-        await closeNewRewardTabs(baselineTabIds, [tab.id], 4, 1200, windowId);
         try {
           await chrome.tabs.remove(tab.id);
           console.log(`[Rewards] Closed tab for ${url}`);
@@ -3136,4 +3265,3 @@ chrome.runtime.onInstalled.addListener(async () => {
 scheduleAlarm();
 scheduleEarlyInternetCheck();
 updateBadge();
-

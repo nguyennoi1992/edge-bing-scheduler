@@ -23,9 +23,19 @@ function formatDayKey(ts) {
 
 function formatMeta(meta) {
   if (!meta || typeof meta !== "object") return "";
+  const formatValue = (value) => {
+    if (value && typeof value === "object") {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  };
   const parts = Object.entries(meta)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => `${key}=${String(value)}`);
+    .map(([key, value]) => `${key}=${formatValue(value)}`);
   return parts.join(" | ");
 }
 
