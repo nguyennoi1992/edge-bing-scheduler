@@ -734,6 +734,151 @@ async function autoClickRewards() {
     }
   }
 
+  async function waitForRewardsDomReady(tabId, targetSectionIds = [], timeoutMs = 45000) {
+    try {
+      await waitForTabComplete(tabId);
+      await ensureTabFocused(tabId);
+
+      const [{ result = { ready: false, count: 0, reason: "missing_result" } } = {}] =
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          args: [targetSectionIds || rewardSectionIds, timeoutMs],
+          func: async (sectionIds, maxWaitMs) => {
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const startedAt = Date.now();
+            const pollMs = 1500;
+            let attempts = 0;
+            let prevCount = -1;
+            let stableRounds = 0;
+            let last = {
+              readyState: document.readyState,
+              hasDailyset: false,
+              sectionCards: 0,
+              fallbackCards: 0,
+              count: 0,
+              attempts: 0,
+            };
+
+            const normalizeText = (value) =>
+              (window.normalizeRewardText || ((v) => (v || "").replace(/\s+/g, " ").trim()))(value);
+            const completedText = (value) =>
+              (window.isCompletedText || ((v) => /\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong/i.test(normalizeText(v).toLowerCase())))(value);
+
+            const isVisible = (el) => {
+              if (!el || typeof el.getBoundingClientRect !== "function") return false;
+              const rect = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              return (
+                rect.width > 0 &&
+                rect.height > 0 &&
+                style.visibility !== "hidden" &&
+                style.display !== "none"
+              );
+            };
+
+            const isDashboardRewardHref = (href) =>
+              /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(href || "") ||
+              /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(href || "");
+
+            const expandSectionIfCollapsed = (section) => {
+              if (!section) return;
+              const triggers = section.querySelectorAll(
+                "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls]",
+              );
+              for (const trigger of triggers) {
+                try { trigger.click(); } catch { }
+              }
+            };
+
+            const isPendingCard = (anchor) => {
+              if (!isVisible(anchor)) return false;
+              if (anchor.getAttribute("aria-disabled") === "true" || anchor.closest("[aria-disabled='true'], [data-disabled='true']")) {
+                return false;
+              }
+              const text = normalizeText(anchor.innerText || anchor.textContent || "");
+              if (!text || completedText(text)) return false;
+              if (/^(see more tasks|earn more)$/i.test(text)) return false;
+              return true;
+            };
+
+            const countSectionCards = (section) => {
+              if (!section) return 0;
+              expandSectionIfCollapsed(section);
+              try { section.scrollIntoView({ behavior: "instant", block: "center" }); } catch { }
+              return Array.from(
+                section.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
+              ).filter(isPendingCard).length;
+            };
+
+            const countFallbackCards = () =>
+              Array.from(
+                document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
+              )
+                .filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""))
+                .filter(isPendingCard)
+                .length;
+
+            while (Date.now() - startedAt < maxWaitMs) {
+              attempts++;
+              const ids = Array.isArray(sectionIds) ? sectionIds : [];
+              const sections = ids
+                .filter((id) => id && id !== "global")
+                .map((id) => document.querySelector(`#${id}`))
+                .filter(Boolean);
+              const dailyset = document.querySelector("#dailyset");
+              const sectionCards = sections.reduce((sum, section) => sum + countSectionCards(section), 0);
+              const fallbackCards =
+                ids.includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)
+                  ? countFallbackCards()
+                  : 0;
+              const count = Math.max(sectionCards, fallbackCards);
+
+              last = {
+                readyState: document.readyState,
+                hasDailyset: !!dailyset,
+                sectionCards,
+                fallbackCards,
+                count,
+                attempts,
+              };
+
+              if (document.readyState === "complete" && count > 0) {
+                if (count === prevCount) {
+                  stableRounds++;
+                } else {
+                  stableRounds = 0;
+                }
+                if (stableRounds >= 1) {
+                  return { ready: true, stableRounds, ...last };
+                }
+              } else {
+                stableRounds = 0;
+              }
+
+              prevCount = count;
+              await sleep(pollMs);
+            }
+
+            return { ready: false, reason: "timeout", stableRounds, ...last };
+          },
+        });
+
+      await appendDebugLog(result.ready ? "info" : "warn", "rewards", "Rewards DOM ready check", {
+        tabId,
+        timeoutMs,
+        ...result,
+      });
+      return result;
+    } catch (e) {
+      await appendDebugLog("warn", "rewards", "Rewards DOM ready check failed", {
+        tabId,
+        error: String(e?.message || e),
+      });
+      return { ready: false, reason: String(e?.message || e) };
+    }
+  }
+
   async function getQuestCards(tabId) {
     const [{ result: questCards = [] } = {}] =
       await chrome.scripting.executeScript({
@@ -1457,7 +1602,8 @@ async function autoClickRewards() {
             }
 
             function isDashboardRewardHref(href) {
-              return /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|crea=ML2G76|wqoskey=)/i.test(href || "");
+              return /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(href || "") ||
+                /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(href || "");
             }
 
             function collectDashboardFallbackCards(debugSections) {
@@ -1789,7 +1935,8 @@ async function autoClickRewards() {
           }
 
           function isDashboardRewardHref(href) {
-            return /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|crea=ML2G76|wqoskey=)/i.test(href || "");
+            return /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(href || "") ||
+              /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(href || "");
           }
 
           function collectDashboardFallbackCards() {
@@ -2142,8 +2289,32 @@ async function autoClickRewards() {
               !!el.closest("[aria-disabled='true'], [data-disabled='true']") ||
               el.disabled === true;
 
+            const collectAllElements = (root) => {
+              const results = [];
+              const visit = (node) => {
+                if (!node) return;
+                if (node.nodeType === Node.ELEMENT_NODE) {
+                  results.push(node);
+                  if (node.shadowRoot) {
+                    visit(node.shadowRoot);
+                  }
+                }
+                const children = node.children || [];
+                for (const child of children) {
+                  visit(child);
+                }
+              };
+              visit(root || document);
+              return results;
+            };
+
             const getPageText = () =>
-              normalizeText(document.body?.innerText || document.body?.textContent || "").toLowerCase();
+              normalizeText(
+                [
+                  document.body?.innerText || document.body?.textContent || "",
+                  ...collectAllElements(document).map((el) => el.getAttribute("aria-label") || el.textContent || ""),
+                ].join(" "),
+              ).toLowerCase();
 
             const isQuizLikePage = () => {
               const url = location.href.toLowerCase();
@@ -2217,12 +2388,16 @@ async function autoClickRewards() {
               );
 
             const buildCandidates = () => {
-              return Array.from(
-                document.querySelectorAll(
-                  "button, [role='button'], a[href], input[type='button'], input[type='submit'], label, [data-tag], [class*='option'], [class*='Option'], [class*='answer'], [class*='Answer'], [class*='choice'], [class*='Choice']",
-                ),
-              )
+              const allElements = collectAllElements(document);
+              return allElements
                 .filter((el) => el instanceof HTMLElement)
+                .filter((el) => {
+                  return (
+                    el.matches(
+                      "button, [role='button'], a[href], input[type='button'], input[type='submit'], label, [data-tag], [class*='option'], [class*='Option'], [class*='answer'], [class*='Answer'], [class*='choice'], [class*='Choice']"
+                    ) || /choice/i.test(el.tagName)
+                  );
+                })
                 .filter((el) => isVisible(el) && !isDisabled(el))
                 .map((el) => {
                   const text = getCandidateText(el);
@@ -2250,6 +2425,11 @@ async function autoClickRewards() {
                   if (el.closest("[class*='BingQA'], [class*='quiz-container'], [id*='quiz-container'], [class*='trivia']")) score += 30;
                   // Boost numbered options (A., B., C., 1., 2., etc.)
                   if (/^\s*[A-Da-d1-4][.)\s]/i.test(text)) score += 20;
+
+                  // Boost choice elements or elements inside cib-choice/cib-shared (Copilot Conversational Quiz)
+                  if (el.tagName.toLowerCase().includes("choice") || el.closest("cib-choice, cib-shared")) {
+                    score += 50;
+                  }
                   return { el, text, score };
                 })
                 .filter((item) => item.score > 0)
@@ -2266,12 +2446,20 @@ async function autoClickRewards() {
             let clicks = 0;
             let lastClickedText = "";
             let sameClickCount = 0;
+            let lastCandidateSnapshot = [];
+
             for (let attempt = 0; attempt < 25; attempt++) {
               if (isQuizCompleted()) {
                 return { handled: true, completed: true, clicks, reason: "completed" };
               }
 
               const candidates = buildCandidates();
+              lastCandidateSnapshot = candidates.slice(0, 8).map((item) => ({
+                text: item.text.substring(0, 100),
+                score: item.score,
+                tag: item.el.tagName,
+              }));
+
               if (!candidates.length) {
                 await sleep(1500);
                 continue;
@@ -2301,6 +2489,11 @@ async function autoClickRewards() {
               completed: isQuizCompleted(),
               clicks,
               reason: isQuizCompleted() ? "completed" : "no_progress",
+              diagnostics: {
+                url: location.href,
+                isConversation: /isconversation/i.test(location.href),
+                candidates: lastCandidateSnapshot,
+              },
             };
           },
         });
@@ -2566,25 +2759,41 @@ async function autoClickRewards() {
         targetSectionIds = ["dailyset", "moreactivities"];
       }
 
-      // Collect all reward cards once, click through each one, then move on.
-      // The second rewards pass after searches will handle any remaining cards.
-      const rewardCardsResult = await getRewardCards(tab.id, targetSectionIds);
-      const rewardCards = Array.isArray(rewardCardsResult) ? rewardCardsResult : [];
-      await appendDebugLog("info", "rewards", `Found ${rewardCards.length} reward card(s) to click`, {
-        url,
-        cards: rewardCards.map((c) => c.key.substring(0, 60)).join(" | "),
-      });
-
-      for (let i = 0; i < rewardCards.length; i++) {
+      // Re-scan after each card. The Rewards dashboard re-renders sections after
+      // every completion, and a one-time card list can go stale or be partial.
+      const cardAttemptCounts = new Map();
+      const maxRewardCardClicks = 8;
+      for (let i = 0; i < maxRewardCardClicks; i++) {
         if (timedOut()) {
           console.warn("[Rewards] Timeout budget reached while clicking reward cards for " + url);
-          await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards, continuing...", { url, processed: i, total: rewardCards.length });
+          await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards, continuing...", { url, processed: i });
         }
 
-        const card = rewardCards[i];
-        console.log(`[Rewards] Clicking reward card ${i + 1}/${rewardCards.length}: ${card.href}`);
-        await appendDebugLog("info", "rewards", `Clicking card ${i + 1}/${rewardCards.length}`, {
+        await waitForRewardsDomReady(
+          tab.id,
+          targetSectionIds,
+          /rewards\.bing\.com\/dashboard/i.test(url) ? 45000 : 20000,
+        );
+        const rewardCardsResult = await getRewardCards(tab.id, targetSectionIds);
+        const rewardCards = Array.isArray(rewardCardsResult) ? rewardCardsResult : [];
+        await appendDebugLog("info", "rewards", `Found ${rewardCards.length} reward card(s) to click`, {
+          url,
+          cards: rewardCards.map((c) => c.key.substring(0, 60)).join(" | "),
+          scan: i + 1,
+        });
+
+        const card = rewardCards.find((candidate) => (cardAttemptCounts.get(candidate.key) || 0) < 2);
+        if (!card) {
+          console.log("[Rewards] No more actionable reward cards found for " + url);
+          break;
+        }
+
+        cardAttemptCounts.set(card.key, (cardAttemptCounts.get(card.key) || 0) + 1);
+        console.log(`[Rewards] Clicking reward card ${i + 1}: ${card.href}`);
+        await appendDebugLog("info", "rewards", `Clicking card ${i + 1}`, {
           href: card.href.substring(0, 80),
+          remaining: rewardCards.length,
+          attempt: cardAttemptCounts.get(card.key),
         });
 
         const childBaselineIds = await getCurrentTabIdSet();
@@ -2630,6 +2839,7 @@ async function autoClickRewards() {
                 completed: quizResult.completed,
                 clicks: quizResult.clicks,
                 reason: quizResult.reason,
+                diagnostics: quizResult.diagnostics,
               });
               await new Promise((r) => setTimeout(r, 2000));
             } else {
@@ -2645,21 +2855,18 @@ async function autoClickRewards() {
           await closeExistingTabs(newTabIds, `child tab(s) from card ${i + 1}`);
         }
 
-        console.log(`[Rewards] Card ${i + 1}/${rewardCards.length} done (clicked=${wasClicked}, childTabs=${newTabIds.length})`);
+        console.log(`[Rewards] Card ${i + 1} done (clicked=${wasClicked}, childTabs=${newTabIds.length})`);
         await appendDebugLog("info", "rewards", `Card ${i + 1} done`, {
           href: card.href.substring(0, 80),
           clicked: wasClicked,
           childTabs: newTabIds.length,
         });
 
-        // Navigate back to rewards page for the next card
-        if (i < rewardCards.length - 1) {
-          await chrome.tabs.update(tab.id, { url, active: true });
-          await waitForTabComplete(tab.id);
-          await ensureTabFocused(tab.id);
-          await injectDomHelpers(tab.id); // Re-inject after navigation
-          await new Promise((r) => setTimeout(r, 2000));
-        }
+        // Navigate back to the rewards page; the next loop waits for cards before scanning.
+        await chrome.tabs.update(tab.id, { url, active: true });
+        await waitForTabComplete(tab.id);
+        await ensureTabFocused(tab.id);
+        await injectDomHelpers(tab.id); // Re-inject after navigation
       }
     } finally {
       chrome.tabs.onCreated.removeListener(onCreated);
