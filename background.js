@@ -603,17 +603,46 @@ async function autoClickRewards() {
       const childIds = descendants.filter((id) => Number.isInteger(id));
 
       if (childIds.length) {
-        try {
-          await chrome.tabs.remove(childIds);
-          console.log(
-            `[Rewards] Closed ${childIds.length} child tab(s) from ${parentTabId}`,
-          );
-        } catch (e) {
-          console.warn(
-            `[Rewards] Failed closing child tab(s) from ${parentTabId}:`,
-            e,
-          );
+        const closedIds = [];
+        const missingIds = [];
+        const failedIds = [];
+        const errors = [];
+        for (const childId of childIds) {
+          try {
+            await chrome.tabs.get(childId);
+          } catch {
+            missingIds.push(childId);
+            continue;
+          }
+          try {
+            await chrome.tabs.remove(childId);
+            try {
+              await chrome.tabs.get(childId);
+              failedIds.push(childId);
+              errors.push({ tabId: childId, error: "tab_still_exists_after_remove" });
+            } catch {
+              closedIds.push(childId);
+            }
+          } catch (e) {
+            failedIds.push(childId);
+            errors.push({ tabId: childId, error: String(e?.message || e) });
+          }
         }
+        const logLevel = failedIds.length ? "warn" : "info";
+        await appendDebugLog(logLevel, "rewards", "Descendant reward tab cleanup result", {
+          parentTabId,
+          round: i + 1,
+          requestedIds: childIds,
+          closedIds,
+          missingIds,
+          failedIds,
+          errors,
+        });
+      } else {
+        await appendDebugLog("info", "rewards", "No descendant reward tabs found", {
+          parentTabId,
+          round: i + 1,
+        });
       }
 
       if (i < rounds - 1) {
@@ -2583,15 +2612,17 @@ async function autoClickRewards() {
     await ensureTabFocused(tab.id);
     const spawnedTabIds = new Set();
     const processedChildTabIds = new Set();
+    const childTabSources = new Map();
     const onCreated = (createdTab) => {
       // Only track tabs opened by the automation tab. User-created tabs in the
       // same window must not be treated as reward child tabs.
       if (
         Number.isInteger(createdTab.id) &&
         createdTab.windowId === windowId &&
-        createdTab.openerTabId === tab.id
+        (createdTab.openerTabId === tab.id || spawnedTabIds.has(createdTab.openerTabId))
       ) {
         spawnedTabIds.add(createdTab.id);
+        childTabSources.set(createdTab.id, "event");
       }
     };
     chrome.tabs.onCreated.addListener(onCreated);
@@ -2601,23 +2632,69 @@ async function autoClickRewards() {
       return new Set(tabs.map((t) => t.id).filter((id) => Number.isInteger(id)));
     };
 
-    const collectNewChildTabIds = async (perClickBaselineIds) => {
-      const currentTabs = await chrome.tabs.query({ windowId });
-      return currentTabs
-        .filter((t) => Number.isInteger(t.id))
-        .filter((t) => t.id !== tab.id)
-        .filter((t) => !perClickBaselineIds.has(t.id))
-        .filter((t) => !processedChildTabIds.has(t.id))
-        .filter((t) => spawnedTabIds.has(t.id) || t.openerTabId === tab.id)
-        .map((t) => t.id);
+    const isDescendantOfRewardTab = (candidateTabId, openerByTabId) => {
+      const seen = new Set();
+      let openerTabId = openerByTabId.get(candidateTabId);
+      while (Number.isInteger(openerTabId) && !seen.has(openerTabId)) {
+        if (openerTabId === tab.id) return true;
+        seen.add(openerTabId);
+        openerTabId = openerByTabId.get(openerTabId);
+      }
+      return false;
     };
 
-    const trackFallbackChildTab = (createdTab, childTabIds) => {
+    const collectTrackedDescendantTabs = async () => {
+      const currentTabs = await chrome.tabs.query({ windowId });
+      const openerByTabId = new Map(
+        currentTabs
+          .filter((currentTab) => Number.isInteger(currentTab.id))
+          .map((currentTab) => [currentTab.id, currentTab.openerTabId]),
+      );
+      return currentTabs.filter((currentTab) =>
+        Number.isInteger(currentTab.id) &&
+        currentTab.id !== tab.id &&
+        (spawnedTabIds.has(currentTab.id) || isDescendantOfRewardTab(currentTab.id, openerByTabId)),
+      );
+    };
+
+    const collectNewChildTabIds = async (perClickBaselineIds, label) => {
+      const trackedTabs = await collectTrackedDescendantTabs();
+      const childTabs = trackedTabs
+        .filter((t) => Number.isInteger(t.id))
+        .filter((t) => !perClickBaselineIds.has(t.id))
+        .filter((t) => !processedChildTabIds.has(t.id))
+        .map((t) => {
+          spawnedTabIds.add(t.id);
+          if (!childTabSources.has(t.id)) childTabSources.set(t.id, "opener");
+          return {
+            id: t.id,
+            url: t.url || "",
+            openerTabId: t.openerTabId,
+            source: childTabSources.get(t.id),
+          };
+        });
+      await appendDebugLog("info", "rewards", "Collected reward child tabs", {
+        label,
+        parentTabId: tab.id,
+        tabs: childTabs,
+      });
+      return childTabs.map((childTab) => childTab.id);
+    };
+
+    const trackFallbackChildTab = async (createdTab, childTabIds) => {
       if (!Number.isInteger(createdTab?.id)) return;
       spawnedTabIds.add(createdTab.id);
+      childTabSources.set(createdTab.id, "fallback");
       if (!childTabIds.includes(createdTab.id)) {
         childTabIds.push(createdTab.id);
       }
+      await appendDebugLog("info", "rewards", "Tracked fallback reward child tab", {
+        parentTabId: tab.id,
+        tabId: createdTab.id,
+        openerTabId: createdTab.openerTabId,
+        url: createdTab.url || createdTab.pendingUrl || "",
+        source: "fallback",
+      });
     };
 
     const markChildTabsProcessed = (childTabIds) => {
@@ -2627,23 +2704,51 @@ async function autoClickRewards() {
     };
 
     const closeExistingTabs = async (tabIds, label) => {
-      const existingTabIds = [];
-      for (const tabIdToClose of tabIds) {
+      const requestedIds = [...new Set(tabIds.filter((tabIdToClose) => Number.isInteger(tabIdToClose)))];
+      const closedIds = [];
+      const missingIds = [];
+      const failedIds = [];
+      const errors = [];
+
+      for (const tabIdToClose of requestedIds) {
+        let tabToClose;
         try {
-          await chrome.tabs.get(tabIdToClose);
-          existingTabIds.push(tabIdToClose);
+          tabToClose = await chrome.tabs.get(tabIdToClose);
         } catch {
-          // User may have closed it manually.
+          missingIds.push(tabIdToClose);
+          continue;
+        }
+
+        try {
+          await chrome.tabs.remove(tabIdToClose);
+          try {
+            await chrome.tabs.get(tabIdToClose);
+            failedIds.push(tabIdToClose);
+            errors.push({ tabId: tabIdToClose, error: "tab_still_exists_after_remove" });
+          } catch {
+            closedIds.push(tabIdToClose);
+          }
+        } catch (e) {
+          failedIds.push(tabIdToClose);
+          errors.push({
+            tabId: tabIdToClose,
+            url: tabToClose?.url || "",
+            error: String(e?.message || e),
+          });
         }
       }
 
-      if (!existingTabIds.length) return;
-      try {
-        await chrome.tabs.remove(existingTabIds);
-        console.log(`[Rewards] Closed ${existingTabIds.length} ${label}`);
-      } catch (e) {
-        console.warn(`[Rewards] Failed closing ${label}:`, e);
-      }
+      const result = { requestedIds, closedIds, missingIds, failedIds };
+      const logLevel = failedIds.length ? "warn" : "info";
+      await appendDebugLog(logLevel, "rewards", "Reward child tab cleanup result", {
+        label,
+        parentTabId: tab.id,
+        ...result,
+        errors,
+      });
+      if (closedIds.length) console.log(`[Rewards] Closed ${closedIds.length} ${label}`);
+      if (failedIds.length) console.warn(`[Rewards] Failed closing ${failedIds.length} ${label}`);
+      return result;
     };
 
     try {
@@ -2760,7 +2865,10 @@ async function autoClickRewards() {
 
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
-            let newTabIds = await collectNewChildTabIds(childBaselineIds);
+            let newTabIds = await collectNewChildTabIds(
+              childBaselineIds,
+              `quest ${i + 1} activity ${j + 1}`,
+            );
 
             // Fallback: If no new tab opened, but we have a valid href, manually open it to register the punch
             if (newTabIds.length === 0 && wasClicked && (targetHref || nextActivity.href)) {
@@ -2774,7 +2882,7 @@ async function autoClickRewards() {
                 try {
                   // MUST be active: true so Bing's tracking script on the search page fires!
                   const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId, openerTabId: tab.id });
-                  trackFallbackChildTab(fallbackTab, newTabIds);
+                  await trackFallbackChildTab(fallbackTab, newTabIds);
                   await waitForTabComplete(fallbackTab.id);
                 } catch (e) {
                   console.warn("[Rewards] Fallback tab creation failed:", e);
@@ -2792,10 +2900,22 @@ async function autoClickRewards() {
               } catch { }
             }
 
-            if (newTabIds.length) {
-              markChildTabsProcessed(newTabIds);
-              await closeExistingTabs(newTabIds, "quest activity tab(s)");
-            }
+            const questCleanupResult = newTabIds.length
+              ? await closeExistingTabs(newTabIds, "quest activity tab(s)")
+              : { requestedIds: [], closedIds: [], missingIds: [], failedIds: [] };
+            markChildTabsProcessed([
+              ...questCleanupResult.closedIds,
+              ...questCleanupResult.missingIds,
+            ]);
+            await appendDebugLog("info", "quests", `Quest activity ${j + 1} done`, {
+              quest: nextQuest.href,
+              activity: nextActivity.label,
+              clicked: wasClicked,
+              childTabIds: newTabIds,
+              closedChildTabIds: questCleanupResult.closedIds,
+              missingChildTabIds: questCleanupResult.missingIds,
+              failedChildTabIds: questCleanupResult.failedIds,
+            });
           }
 
           await chrome.tabs.update(tab.id, { url, active: true });
@@ -2884,7 +3004,7 @@ async function autoClickRewards() {
 
         // Collect only child tabs spawned by this card click. A card can open
         // more than one tab, and the user may close one manually while we run.
-        const newTabIds = await collectNewChildTabIds(childBaselineIds);
+        const newTabIds = await collectNewChildTabIds(childBaselineIds, `reward card ${i + 1}`);
 
         if (newTabIds.length === 0 && (card.href || resultHref)) {
           let fullHref = resultHref || card.href;
@@ -2899,7 +3019,7 @@ async function autoClickRewards() {
             console.log("[Rewards] Reward card did not open a child tab, falling back to manual open: " + fullHref);
             try {
               const fallbackTab = await chrome.tabs.create({ url: fullHref, active: true, windowId, openerTabId: tab.id });
-              trackFallbackChildTab(fallbackTab, newTabIds);
+              await trackFallbackChildTab(fallbackTab, newTabIds);
               await waitForTabComplete(fallbackTab.id);
             } catch (e) {
               console.warn("[Rewards] Fallback tab creation failed:", e);
@@ -2929,16 +3049,23 @@ async function autoClickRewards() {
         }
 
         // Close child tabs after scrolling
-        if (newTabIds.length) {
-          markChildTabsProcessed(newTabIds);
-          await closeExistingTabs(newTabIds, `child tab(s) from card ${i + 1}`);
-        }
+        const cardCleanupResult = newTabIds.length
+          ? await closeExistingTabs(newTabIds, `child tab(s) from card ${i + 1}`)
+          : { requestedIds: [], closedIds: [], missingIds: [], failedIds: [] };
+        markChildTabsProcessed([
+          ...cardCleanupResult.closedIds,
+          ...cardCleanupResult.missingIds,
+        ]);
 
         console.log(`[Rewards] Card ${i + 1} done (clicked=${wasClicked}, childTabs=${newTabIds.length})`);
         await appendDebugLog("info", "rewards", `Card ${i + 1} done`, {
           href: card.href.substring(0, 80),
           clicked: wasClicked,
           childTabs: newTabIds.length,
+          childTabIds: newTabIds,
+          closedChildTabIds: cardCleanupResult.closedIds,
+          missingChildTabIds: cardCleanupResult.missingIds,
+          failedChildTabIds: cardCleanupResult.failedIds,
         });
 
         // Navigate back to the rewards page; the next loop waits for cards before scanning.
@@ -2950,18 +3077,36 @@ async function autoClickRewards() {
     } finally {
       chrome.tabs.onCreated.removeListener(onCreated);
       if (tab.id) {
-        if (spawnedTabIds.size) {
-          const idsToClose = [...spawnedTabIds].filter(
-            (id) => id !== tab.id && !processedChildTabIds.has(id),
-          );
-          await closeExistingTabs(idsToClose, `tracked spawned tab(s) from ${url}`);
-        }
+        const trackedDescendantTabs = await collectTrackedDescendantTabs();
+        const idsToClose = [
+          ...new Set([
+            ...spawnedTabIds,
+            ...trackedDescendantTabs.map((trackedTab) => trackedTab.id),
+          ]),
+        ].filter((id) => id !== tab.id && !processedChildTabIds.has(id));
+        const finalCleanupResult = await closeExistingTabs(
+          idsToClose,
+          `tracked spawned tab(s) from ${url}`,
+        );
+        markChildTabsProcessed([
+          ...finalCleanupResult.closedIds,
+          ...finalCleanupResult.missingIds,
+        ]);
         await closeChildTabs(tab.id, 4, 1200, windowId);
         try {
           await chrome.tabs.remove(tab.id);
           console.log(`[Rewards] Closed tab for ${url}`);
+          await appendDebugLog("info", "rewards", "Closed reward parent tab", {
+            tabId: tab.id,
+            url,
+          });
         } catch (e) {
           console.warn(`[Rewards] Failed to close tab for ${url}:`, e);
+          await appendDebugLog("warn", "rewards", "Failed closing reward parent tab", {
+            tabId: tab.id,
+            url,
+            error: String(e?.message || e),
+          });
         }
       }
     }
