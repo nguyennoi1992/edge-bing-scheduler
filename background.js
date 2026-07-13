@@ -32,6 +32,8 @@ const INTERNET_CHECK_URLS = [
   "https://www.cloudflare.com/cdn-cgi/trace",
 ];
 const INTERNET_CHECK_TIMEOUT_MS = 10000;
+const TAB_LOAD_TIMEOUT_MS = 30000;
+const TAB_LOAD_MAX_ATTEMPTS = 3;
 
 // Keep the MV3 service worker alive during active runs
 async function startKeepAlive() {
@@ -2593,7 +2595,7 @@ async function autoClickRewards() {
     };
 
     try {
-      await waitForTabComplete(tab.id);
+      await ensureTabLoaded(tab.id, url);
       await ensureTabFocused(tab.id);
       await new Promise((r) => setTimeout(r, /rewards\.bing\.com\/dashboard/i.test(url) ? 8000 : 2000));
 
@@ -2613,7 +2615,7 @@ async function autoClickRewards() {
           });
           await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
           await chrome.tabs.reload(tab.id);
-          await waitForTabComplete(tab.id);
+          await ensureTabLoaded(tab.id, url);
           await injectDomHelpers(tab.id); // Re-inject after reload
           await new Promise((r) => setTimeout(r, 2000));
         } else {
@@ -2742,7 +2744,7 @@ async function autoClickRewards() {
           }
 
           await chrome.tabs.update(tab.id, { url, active: true });
-          await waitForTabComplete(tab.id);
+          await ensureTabLoaded(tab.id, url);
           await ensureTabFocused(tab.id);
           await injectDomHelpers(tab.id); // Re-inject after navigation
           await new Promise((r) => setTimeout(r, 2000));
@@ -2883,7 +2885,7 @@ async function autoClickRewards() {
 
         // Navigate back to the rewards page; the next loop waits for cards before scanning.
         await chrome.tabs.update(tab.id, { url, active: true });
-        await waitForTabComplete(tab.id);
+        await ensureTabLoaded(tab.id, url);
         await ensureTabFocused(tab.id);
         await injectDomHelpers(tab.id); // Re-inject after navigation
       }
@@ -2950,32 +2952,129 @@ async function typeInBing(query, perCharDelayMs = 80) {
   return { ok: true };
 }
 
-function waitForTabComplete(tabId, timeoutMs = 15000) {
+function waitForTabComplete(tabId, timeoutMs = TAB_LOAD_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
+    let settled = false;
+
+    const cleanup = () => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      clearInterval(timer);
+    };
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+
     function onUpdated(updatedTabId, info) {
       if (updatedTabId !== tabId) return;
       if (info.status === "complete") {
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-        resolve();
+        finish();
       }
     }
     chrome.tabs.onUpdated.addListener(onUpdated);
-    const t = setInterval(async () => {
+    const timer = setInterval(async () => {
       if (Date.now() - start > timeoutMs) {
-        chrome.tabs.onUpdated.removeListener(onUpdated);
-        clearInterval(t);
-        reject(new Error("timeout waiting for tab load"));
+        finish(new Error("timeout waiting for tab load"));
       } else {
-        let tInfo; try { tInfo = await chrome.tabs.get(tabId); } catch (e) { chrome.tabs.onUpdated.removeListener(onUpdated); clearInterval(t); return reject(e); }
+        let tInfo;
+        try {
+          tInfo = await chrome.tabs.get(tabId);
+        } catch (e) {
+          finish(e);
+          return;
+        }
         if (tInfo.status === "complete") {
-          chrome.tabs.onUpdated.removeListener(onUpdated);
-          clearInterval(t);
-          resolve();
+          finish();
         }
       }
     }, 200);
   });
+}
+
+async function inspectLoadedTab(tabId, expectedUrl = "") {
+  const tab = await chrome.tabs.get(tabId);
+  const actualUrl = tab.url || tab.pendingUrl || "";
+  const browserErrorUrl = /^(?:edge|chrome)-error:\/\//i.test(actualUrl);
+  const expectedHost = expectedUrl ? new URL(expectedUrl).hostname : "";
+  const actualHost = /^https?:/i.test(actualUrl) ? new URL(actualUrl).hostname : "";
+
+  let page = null;
+  try {
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        const text = (document.body?.innerText || "").slice(0, 2000);
+        const title = document.title || "";
+        const errorText = `${title}\n${text}`;
+        return {
+          readyState: document.readyState,
+          hasBody: !!document.body,
+          bodyLength: text.trim().length,
+          online: navigator.onLine,
+          errorPage: /(?:ERR_[A-Z_]+|This site can(?:'|’)t be reached|There is no Internet connection|Hmmm… can(?:'|’)t reach this page|DNS_PROBE_)/i.test(errorText),
+        };
+      },
+    });
+    page = result || null;
+  } catch {
+    // Some child URLs are outside host_permissions. Tab status/URL checks still apply.
+  }
+
+  const valid = tab.status === "complete" &&
+    !browserErrorUrl &&
+    (!expectedHost || actualHost === expectedHost) &&
+    (!page || (page.readyState === "complete" && page.hasBody && page.online !== false && !page.errorPage));
+
+  return { valid, actualUrl, expectedHost, actualHost, browserErrorUrl, page };
+}
+
+async function ensureTabLoaded(tabId, expectedUrl, options = {}) {
+  const attempts = options.attempts || TAB_LOAD_MAX_ATTEMPTS;
+  const timeoutMs = options.timeoutMs || TAB_LOAD_TIMEOUT_MS;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await waitForTabComplete(tabId, timeoutMs);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const inspection = await inspectLoadedTab(tabId, expectedUrl);
+      if (inspection.valid) return inspection;
+      lastError = new Error(`tab validation failed: ${inspection.actualUrl || "unknown URL"}`);
+      await appendDebugLog("warn", "navigation", "Loaded tab failed validation", {
+        expectedUrl,
+        actualUrl: inspection.actualUrl,
+        attempt,
+        browserErrorUrl: inspection.browserErrorUrl,
+        page: inspection.page,
+      });
+    } catch (e) {
+      lastError = e;
+      await appendDebugLog("warn", "navigation", "Tab load attempt failed", {
+        expectedUrl,
+        attempt,
+        error: String(e),
+      });
+    }
+
+    if (attempt < attempts) {
+      await ensureInternetOrThrow(`tab_load_retry_${attempt}`);
+      await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+      await chrome.tabs.update(tabId, { url: expectedUrl, active: true });
+    }
+  }
+
+  await appendDebugLog("error", "navigation", "Tab failed to load after retries", {
+    expectedUrl,
+    attempts,
+    error: String(lastError),
+  });
+  throw lastError || new Error(`failed to load ${expectedUrl}`);
 }
 
 async function openBingAndType(query) {
@@ -3013,7 +3112,7 @@ async function openBingAndType(query) {
   }
 
   try {
-    await waitForTabComplete(tabId);
+    await ensureTabLoaded(tabId, "https://www.bing.com/");
     await ensureTabFocused(tabId);
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -3024,6 +3123,7 @@ async function openBingAndType(query) {
   } catch (e) {
     const url = "https://www.bing.com/search?q=" + encodeURIComponent(query);
     await chrome.tabs.update(tabId, { url, active: true });
+    await ensureTabLoaded(tabId, url);
   }
 }
 
