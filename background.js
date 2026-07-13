@@ -2762,6 +2762,7 @@ async function autoClickRewards() {
       // Re-scan after each card. The Rewards dashboard re-renders sections after
       // every completion, and a one-time card list can go stale or be partial.
       const cardAttemptCounts = new Map();
+      const discoveredRewardCards = new Map();
       const maxRewardCardClicks = 8;
       for (let i = 0; i < maxRewardCardClicks; i++) {
         if (timedOut()) {
@@ -2776,13 +2777,31 @@ async function autoClickRewards() {
         );
         const rewardCardsResult = await getRewardCards(tab.id, targetSectionIds);
         const rewardCards = Array.isArray(rewardCardsResult) ? rewardCardsResult : [];
+        for (const discoveredCard of rewardCards) {
+          discoveredRewardCards.set(discoveredCard.key, discoveredCard);
+        }
         await appendDebugLog("info", "rewards", `Found ${rewardCards.length} reward card(s) to click`, {
           url,
           cards: rewardCards.map((c) => c.key.substring(0, 60)).join(" | "),
           scan: i + 1,
         });
 
-        const card = rewardCards.find((candidate) => (cardAttemptCounts.get(candidate.key) || 0) < 2);
+        let card = rewardCards.find((candidate) => !cardAttemptCounts.has(candidate.key));
+        if (!card) {
+          card = [...discoveredRewardCards.values()].find(
+            (candidate) => (cardAttemptCounts.get(candidate.key) || 0) < 1,
+          );
+          if (card) {
+            await appendDebugLog("warn", "rewards", "Using previously discovered reward card after empty re-scan", {
+              href: card.href.substring(0, 80),
+              queued: discoveredRewardCards.size,
+              scan: i + 1,
+            });
+          }
+        }
+        if (!card) {
+          card = rewardCards.find((candidate) => (cardAttemptCounts.get(candidate.key) || 0) < 2);
+        }
         if (!card) {
           console.log("[Rewards] No more actionable reward cards found for " + url);
           break;

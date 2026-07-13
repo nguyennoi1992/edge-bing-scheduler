@@ -10,7 +10,9 @@
     "tabs",
     "notifications",
     "scripting",
-    "sidePanel"
+    "sidePanel",
+    "identity",
+    "identity.email"
   ],
   "host_permissions": [
     "https://www.bing.com/*",

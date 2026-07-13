@@ -105,11 +105,39 @@ async function loadLogs() {
   renderLogs(logs);
 }
 
+async function getProfileInfo() {
+  let account = {};
+  try {
+    account = await chrome.identity.getProfileUserInfo();
+  } catch (e) {
+    console.warn("[UI] Failed to read profile account:", e);
+  }
+
+  const manifest = chrome.runtime.getManifest();
+  return {
+    email: account.email || "Not available",
+    accountId: account.id || "Not available",
+    extensionId: chrome.runtime.id,
+    extensionVersion: manifest.version,
+  };
+}
+
+function sanitizeFilenamePart(value) {
+  return String(value || "unknown-profile")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "unknown-profile";
+}
+
 async function exportLogs() {
-  const logs = await getLogs();
+  const [logs, profile] = await Promise.all([getLogs(), getProfileInfo()]);
   const lines = [
     `Bing Scheduler Debug Logs`,
     `Exported: ${formatDate(Date.now())}`,
+    `Profile email: ${profile.email}`,
+    `Profile account ID: ${profile.accountId}`,
+    `Extension ID: ${profile.extensionId}`,
+    `Extension version: ${profile.extensionVersion}`,
     `Retention: last 7 days`,
     `Count: ${logs.length}`,
     "",
@@ -120,7 +148,7 @@ async function exportLogs() {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const a = document.createElement("a");
   a.href = url;
-  a.download = `bing-scheduler-logs-${stamp}.txt`;
+  a.download = `bing-scheduler-logs-${sanitizeFilenamePart(profile.email)}-${stamp}.txt`;
   document.body.appendChild(a);
   a.click();
   a.remove();
