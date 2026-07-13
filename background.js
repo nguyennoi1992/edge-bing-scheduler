@@ -1470,6 +1470,8 @@ async function autoClickRewards() {
 
             function collectSectionCardsById(sectionId, debugSections) {
               let section = null;
+              const clickCompletedCards =
+                sectionId === "dailyset" && /rewards\.bing\.com\/dashboard/i.test(location.href);
               const sectionDebug = {
                 sectionId,
                 exists: true,
@@ -1510,7 +1512,7 @@ async function autoClickRewards() {
                   text,
                   hasVisual: !!card.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                   isDisabled: card.getAttribute("aria-disabled") === "true" || !!card.closest("[aria-disabled='true'], [data-disabled='true']"),
-                  isCompleted: isCardCompleted(card),
+                  isCompleted: clickCompletedCards ? false : isCardCompleted(card),
                   isVisible: isVisible(card),
                   isInNav: !!card.closest("nav, header, footer, [role='banner']"),
                   isQuestCard: !!card.closest("#quests"),
@@ -1560,7 +1562,7 @@ async function autoClickRewards() {
                   text,
                   hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                   isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                  isCompleted: isCardCompleted(anchor),
+                  isCompleted: clickCompletedCards ? false : isCardCompleted(anchor),
                   isVisible: isVisible(anchor),
                   isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                   isQuestCard: !!anchor.closest("#quests"),
@@ -1637,7 +1639,7 @@ async function autoClickRewards() {
                   text,
                   hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                   isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                  isCompleted: isCardCompleted(anchor),
+                  isCompleted: false,
                   isVisible: isVisible(anchor),
                   isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                   isQuestCard: !!anchor.closest("#quests"),
@@ -1874,6 +1876,8 @@ async function autoClickRewards() {
 
           function collectSectionCardsById(sectionId) {
             let section = null;
+            const clickCompletedCards =
+              sectionId === "dailyset" && /rewards\.bing\.com\/dashboard/i.test(location.href);
             if (sectionId !== "global") {
               section = document.querySelector(`#${sectionId}`);
               if (!section) return [];
@@ -1896,7 +1900,7 @@ async function autoClickRewards() {
                 text,
                 hasVisual: !!card.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                 isDisabled: card.getAttribute("aria-disabled") === "true" || !!card.closest("[aria-disabled='true'], [data-disabled='true']"),
-                isCompleted: isCardCompleted(card),
+                isCompleted: clickCompletedCards ? false : isCardCompleted(card),
                 isVisible: isVisible(card),
                 isInNav: !!card.closest("nav, header, footer, [role='banner']"),
                 isQuestCard: !!card.closest("#quests"),
@@ -1920,7 +1924,7 @@ async function autoClickRewards() {
                 text,
                 hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                 isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                isCompleted: isCardCompleted(anchor),
+                isCompleted: clickCompletedCards ? false : isCardCompleted(anchor),
                 isVisible: isVisible(anchor),
                 isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                 isQuestCard: !!anchor.closest("#quests"),
@@ -1956,7 +1960,7 @@ async function autoClickRewards() {
                 text,
                 hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                 isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                isCompleted: isCardCompleted(anchor),
+                isCompleted: false,
                 isVisible: isVisible(anchor),
                 isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                 isQuestCard: !!anchor.closest("#quests"),
@@ -3026,12 +3030,27 @@ async function inspectLoadedTab(tabId, expectedUrl = "") {
     // Some child URLs are outside host_permissions. Tab status/URL checks still apply.
   }
 
-  const valid = tab.status === "complete" &&
+  const pageComplete = !!page &&
+    page.readyState === "complete" &&
+    page.hasBody &&
+    page.online !== false &&
+    !page.errorPage;
+  const loadComplete = tab.status === "complete" || pageComplete;
+  const valid = loadComplete &&
     !browserErrorUrl &&
     (!expectedHost || actualHost === expectedHost) &&
-    (!page || (page.readyState === "complete" && page.hasBody && page.online !== false && !page.errorPage));
+    (!page || pageComplete);
 
-  return { valid, actualUrl, expectedHost, actualHost, browserErrorUrl, page };
+  return {
+    valid,
+    tabStatus: tab.status || "unknown",
+    loadComplete,
+    actualUrl,
+    expectedHost,
+    actualHost,
+    browserErrorUrl,
+    page,
+  };
 }
 
 async function ensureTabLoaded(tabId, expectedUrl, options = {}) {
@@ -3041,7 +3060,25 @@ async function ensureTabLoaded(tabId, expectedUrl, options = {}) {
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      await waitForTabComplete(tabId, timeoutMs);
+      const initialInspection = await inspectLoadedTab(tabId, expectedUrl);
+      if (initialInspection.valid) return initialInspection;
+
+      try {
+        await waitForTabComplete(tabId, timeoutMs);
+      } catch (waitError) {
+        const timeoutInspection = await inspectLoadedTab(tabId, expectedUrl);
+        if (timeoutInspection.valid) {
+          await appendDebugLog("warn", "navigation", "Tab API remained loading but page DOM is ready", {
+            expectedUrl,
+            actualUrl: timeoutInspection.actualUrl,
+            attempt,
+            tabStatus: timeoutInspection.tabStatus,
+            page: timeoutInspection.page,
+          });
+          return timeoutInspection;
+        }
+        throw waitError;
+      }
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const inspection = await inspectLoadedTab(tabId, expectedUrl);
       if (inspection.valid) return inspection;
@@ -3050,6 +3087,8 @@ async function ensureTabLoaded(tabId, expectedUrl, options = {}) {
         expectedUrl,
         actualUrl: inspection.actualUrl,
         attempt,
+        tabStatus: inspection.tabStatus,
+        loadComplete: inspection.loadComplete,
         browserErrorUrl: inspection.browserErrorUrl,
         page: inspection.page,
       });
