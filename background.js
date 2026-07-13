@@ -281,7 +281,7 @@ function getQueryList(cfg) {
 /**
  * Inject the reward-dom-helpers functions into the page's MAIN world as globals.
  * This MUST be called before any executeScript({world:"MAIN"}) that references
- * normalizeRewardText, buildQuestCardKey, buildRewardCardKey, etc.
+ * window.normalizeRewardText, window.buildQuestCardKey, window.buildRewardCardKey, etc.
  *
  * Without this, those symbols are only available in the service-worker module
  * scope (imported from reward-dom-helpers.js) and every injected script would
@@ -293,8 +293,15 @@ async function injectDomHelpers(tabId) {
     target: { tabId },
     world: "MAIN",
     func: () => {
-      // Guard: only define once per page load
-      if (window.__rewardDomHelpersInjected) return;
+      const helpersReady =
+        typeof window.normalizeRewardText === "function" &&
+        typeof window.isCompletedText === "function" &&
+        typeof window.isActionableRewardCard === "function" &&
+        typeof window.buildRewardCardKey === "function" &&
+        typeof window.buildQuestCardKey === "function" &&
+        typeof window.isActionableQuestActivity === "function" &&
+        typeof window.buildQuestActivityKey === "function";
+      if (window.__rewardDomHelpersInjected && helpersReady) return;
       window.__rewardDomHelpersInjected = true;
 
       window.normalizeRewardText = function normalizeRewardText(value) {
@@ -737,6 +744,7 @@ async function autoClickRewards() {
   }
 
   async function waitForRewardsDomReady(tabId, targetSectionIds = [], timeoutMs = 45000) {
+    await injectDomHelpers(tabId);
     try {
       await waitForTabComplete(tabId);
       await ensureTabFocused(tabId);
@@ -882,6 +890,7 @@ async function autoClickRewards() {
   }
 
   async function getQuestCards(tabId) {
+    await injectDomHelpers(tabId);
     const [{ result: questCards = [] } = {}] =
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -917,10 +926,10 @@ async function autoClickRewards() {
               continue;
             }
 
-            const linkText = normalizeRewardText(node.innerText || node.textContent || "");
+            const linkText = window.normalizeRewardText(node.innerText || node.textContent || "");
             if (!linkText) continue;
 
-            const key = buildQuestCardKey({ href, text: linkText });
+            const key = window.buildQuestCardKey({ href, text: linkText });
 
             // Dedup by actual href (stable) to avoid re-processing the same quest
             // when dynamic text like "2/7 tasks" changes to "4/7 tasks" after activities.
@@ -944,6 +953,7 @@ async function autoClickRewards() {
   }
 
   async function clickQuestCard(tabId, targetHref) {
+    await injectDomHelpers(tabId);
     const [{ result: clicked = false }] =
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -977,8 +987,8 @@ async function autoClickRewards() {
             card = questNodes.find((el) => {
               if (!isVisible(el)) return false;
               const href = el.getAttribute("href") || "";
-              const linkText = normalizeRewardText(el.innerText || el.textContent || "");
-              const key = buildQuestCardKey({ href, text: linkText });
+              const linkText = window.normalizeRewardText(el.innerText || el.textContent || "");
+              const key = window.buildQuestCardKey({ href, text: linkText });
               return key === hrefToClick;
             });
 
@@ -1017,6 +1027,7 @@ async function autoClickRewards() {
   }
 
   async function getQuestActivities(tabId) {
+    await injectDomHelpers(tabId);
     const [{ result: activities = [] } = {}] =
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -1039,7 +1050,7 @@ async function autoClickRewards() {
           console.log("[Rewards-Debug] getQuestActivities: Scanning DOM for activities section...");
           let activitiesRoot = null;
           const activitiesHeading = Array.from(document.querySelectorAll("h2, h3, h4")).find(
-            (el) => isVisible(el) && /activities|hoạt động|tareas|activités|aufgaben/i.test(normalizeRewardText(el.textContent)),
+            (el) => isVisible(el) && /activities|hoạt động|tareas|activités|aufgaben/i.test(window.normalizeRewardText(el.textContent)),
           );
           if (activitiesHeading) {
             activitiesRoot =
@@ -1071,19 +1082,19 @@ async function autoClickRewards() {
           const seen = new Set();
           const items = [];
           for (const card of activityCards) {
-            const cardText = normalizeRewardText(card.innerText || card.textContent || "");
+            const cardText = window.normalizeRewardText(card.innerText || card.textContent || "");
             const actionTarget =
               card.querySelector("button:not([aria-disabled='true']), [role='button']:not([aria-disabled='true']), a[href], [role='link'], [data-react-aria-pressable='true']") ||
               card;
             const href = actionTarget.href || actionTarget.getAttribute("href") || "";
-            const innerLabel = normalizeRewardText(actionTarget.innerText || actionTarget.textContent || cardText);
-            const ariaLabel = normalizeRewardText(actionTarget.getAttribute("aria-label") || "");
+            const innerLabel = window.normalizeRewardText(actionTarget.innerText || actionTarget.textContent || cardText);
+            const ariaLabel = window.normalizeRewardText(actionTarget.getAttribute("aria-label") || "");
             const label = ariaLabel || innerLabel || cardText;
             const isCompleted =
               !!card.closest("[class*='completed'], [class*='Success']") ||
               !!card.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
-              isCompletedText(cardText);
-            const isActionable = isActionableQuestActivity({
+              window.isCompletedText(cardText);
+            const isActionable = window.isActionableQuestActivity({
               innerLabel: label,
               ariaLabel: "",
               isVisible: true,
@@ -1095,7 +1106,7 @@ async function autoClickRewards() {
               isCompleted,
             });
             if (!isActionable) continue;
-            const key = buildQuestActivityKey({ href, innerLabel: `${cardText} ${label}`, ariaLabel: "" });
+            const key = window.buildQuestActivityKey({ href, innerLabel: `${cardText} ${label}`, ariaLabel: "" });
             if (seen.has(key)) continue;
             seen.add(key);
             items.push({ href, label, key });
@@ -1111,6 +1122,7 @@ async function autoClickRewards() {
   }
 
   async function clickQuestActivity(tabId, targetKey) {
+    await injectDomHelpers(tabId);
     const [{ result: clicked = false }] =
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -1140,7 +1152,7 @@ async function autoClickRewards() {
             console.log("[Rewards-Debug] getQuestActivities: Scanning DOM for activities section...");
             let activitiesRoot = null;
             const activitiesHeading = Array.from(document.querySelectorAll("h2, h3, h4")).find(
-              (heading) => isVisible(heading) && /activities|hoạt động|tareas|activités|aufgaben/i.test(normalizeRewardText(heading.textContent)),
+              (heading) => isVisible(heading) && /activities|hoạt động|tareas|activités|aufgaben/i.test(window.normalizeRewardText(heading.textContent)),
             );
             if (activitiesHeading) {
               activitiesRoot =
@@ -1169,18 +1181,18 @@ async function autoClickRewards() {
               }
 
               for (const candidate of cards) {
-                const cardText = normalizeRewardText(candidate.innerText || candidate.textContent || "");
+                const cardText = window.normalizeRewardText(candidate.innerText || candidate.textContent || "");
                 const target =
                   candidate.querySelector("button:not([aria-disabled='true']), [role='button']:not([aria-disabled='true']), a[href], [role='link'], [data-react-aria-pressable='true']") ||
                   candidate;
                 const href = target.href || target.getAttribute("href") || "";
-                const innerLabel = normalizeRewardText(target.innerText || target.textContent || cardText);
-                const candKey = buildQuestActivityKey({
+                const innerLabel = window.normalizeRewardText(target.innerText || target.textContent || cardText);
+                const candKey = window.buildQuestActivityKey({
                   href,
                   innerLabel: `${cardText} ${innerLabel || cardText}`,
                   ariaLabel: "",
                 });
-                const isMatchable = isActionableQuestActivity({
+                const isMatchable = window.isActionableQuestActivity({
                   innerLabel: innerLabel || cardText,
                   ariaLabel: "",
                   isVisible: true,
@@ -1192,7 +1204,7 @@ async function autoClickRewards() {
                   isCompleted:
                     !!candidate.closest("[class*='completed'], [class*='Success']") ||
                     !!candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
-                    isCompletedText(cardText),
+                    window.isCompletedText(cardText),
                 });
                 if (!isMatchable) continue;
 
@@ -1212,7 +1224,7 @@ async function autoClickRewards() {
           if (!el) return { clicked: false, href: "" };
 
           const beforeUrl = location.href;
-          const beforeText = normalizeRewardText(document.body?.innerText || document.body?.textContent || "");
+          const beforeText = window.normalizeRewardText(document.body?.innerText || document.body?.textContent || "");
 
           function centerPoint(element) {
             const rect = element.getBoundingClientRect();
@@ -1331,7 +1343,7 @@ async function autoClickRewards() {
             } catch { }
 
             const afterUrl = location.href;
-            const afterText = normalizeRewardText(document.body?.innerText || document.body?.textContent || "");
+            const afterText = window.normalizeRewardText(document.body?.innerText || document.body?.textContent || "");
             if (afterUrl !== beforeUrl || afterText !== beforeText) {
               console.log("[Rewards-Debug] clickQuestActivity: DOM state changed (URL or Text). Click registered successfully.");
               success = true;
@@ -1355,24 +1367,26 @@ async function autoClickRewards() {
   }
 
   async function getRewardCards(tabId, targetSectionIds) {
-    const [{ result: scanResult = { cards: [], debug: [] } } = {}] =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        args: [targetSectionIds || rewardSectionIds],
-        func: (sectionIds) => {
-          return new Promise((resolve) => {
-            const isVisible = (el) => {
-              if (!el || typeof el.getBoundingClientRect !== "function") return false;
-              const rect = el.getBoundingClientRect();
-              const style = window.getComputedStyle(el);
-              return (
-                rect.width > 0 &&
-                rect.height > 0 &&
-                style.visibility !== "hidden" &&
-                style.display !== "none"
-              );
-            };
+    await injectDomHelpers(tabId);
+    const scanTimeoutMs = 40000;
+    let scanTimeoutId;
+    const scanExecution = chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [targetSectionIds || rewardSectionIds],
+      func: (sectionIds) => {
+        return new Promise((resolve) => {
+          const isVisible = (el) => {
+            if (!el || typeof el.getBoundingClientRect !== "function") return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.visibility !== "hidden" &&
+              style.display !== "none"
+            );
+          };
 
             function expandSectionIfCollapsed(section) {
               if (!section) return;
@@ -1407,19 +1421,19 @@ async function autoClickRewards() {
                 "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
               );
               for (const el of statusEls) {
-                const t = normalizeRewardText(el.textContent || "").toLowerCase();
-                if (isCompletedText(t)) return true;
+                const t = window.normalizeRewardText(el.textContent || "").toLowerCase();
+                if (window.isCompletedText(t)) return true;
               }
 
-              const fullText = normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
-              if (isCompletedText(fullText)) return true;
+              const fullText = window.normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
+              if (window.isCompletedText(fullText)) return true;
 
               return false;
             }
 
             function getRewardRejectReasons(meta) {
               const href = meta.href || "";
-              const text = normalizeRewardText(meta.text).toLowerCase();
+              const text = window.normalizeRewardText(meta.text).toLowerCase();
               const reasons = [];
               if (meta.isVisible === false) reasons.push("not_visible");
               if (meta.isDisabled) reasons.push("disabled");
@@ -1505,8 +1519,8 @@ async function autoClickRewards() {
                   card.getAttribute("href") ||
                   card.querySelector("a[href]")?.getAttribute("href") ||
                   "";
-                const text = normalizeRewardText(card.innerText || card.textContent || "");
-                const key = buildRewardCardKey({ href, text });
+                const text = window.normalizeRewardText(card.innerText || card.textContent || "");
+                const key = window.buildRewardCardKey({ href, text });
                 const meta = {
                   href,
                   text,
@@ -1519,7 +1533,7 @@ async function autoClickRewards() {
                   isHeader: card.hasAttribute("slot") || card.hasAttribute("aria-controls") || card.hasAttribute("aria-expanded") || !!card.closest("h1, h2, h3, h4") || !!card.querySelector("h1, h2, h3, h4"),
                   isPressable: card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") || !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
                 };
-                const isActionable = isActionableRewardCard(meta);
+                const isActionable = window.isActionableRewardCard(meta);
 
                 if (!isActionable) {
                   // Debug logging to find out WHY the card was rejected
@@ -1555,8 +1569,8 @@ async function autoClickRewards() {
                 if (seen.has(anchor)) continue;
 
                 const href = anchor.getAttribute("href") || "";
-                const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
-                const key = buildRewardCardKey({ href, text });
+                const text = window.normalizeRewardText(anchor.innerText || anchor.textContent || "");
+                const key = window.buildRewardCardKey({ href, text });
                 const meta = {
                   href,
                   text,
@@ -1570,7 +1584,7 @@ async function autoClickRewards() {
                   isPressable: true,
                 };
 
-                if (!isActionableRewardCard(meta)) {
+                if (!window.isActionableRewardCard(meta)) {
                   if (sectionDebug.rejected.length < 8) {
                     sectionDebug.rejected.push({
                       href: href.substring(0, 100),
@@ -1623,17 +1637,21 @@ async function autoClickRewards() {
               };
               debugSections.push(sectionDebug);
 
-              const anchors = Array.from(
-                document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
+              const roundedAnchors = Array.from(
+                document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
+              );
+              const pressableRewardAnchors = Array.from(
+                document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
               ).filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
+              const anchors = [...new Set([...roundedAnchors, ...pressableRewardAnchors])];
               sectionDebug.cardRoots = anchors.length;
 
               const unique = [];
               const seen = new Set();
               for (const anchor of anchors) {
                 const href = anchor.getAttribute("href") || "";
-                const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
-                const key = buildRewardCardKey({ href, text });
+                const text = window.normalizeRewardText(anchor.innerText || anchor.textContent || "");
+                const key = window.buildRewardCardKey({ href, text });
                 const meta = {
                   href,
                   text,
@@ -1647,7 +1665,7 @@ async function autoClickRewards() {
                   isPressable: true,
                 };
 
-                if (!isActionableRewardCard(meta)) {
+                if (!window.isActionableRewardCard(meta)) {
                   if (sectionDebug.rejected.length < 8) {
                     sectionDebug.rejected.push({
                       href: href.substring(0, 100),
@@ -1692,7 +1710,7 @@ async function autoClickRewards() {
                 card.querySelector("img[alt]");
               const rawTitle =
                 titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
-              return buildRewardCardKey({
+              return window.buildRewardCardKey({
                 href,
                 title: rawTitle,
                 text: card?.innerText || card?.textContent || "",
@@ -1727,53 +1745,79 @@ async function autoClickRewards() {
             let lastDebug = [];
 
             const timer = setInterval(() => {
-              attempts++;
-              const debug = [];
-              const sectionCards = (sectionIds || [])
-                .map((sectionId) => collectSectionCardsById(sectionId, debug))
-                .flat();
-              if (
-                sectionCards.length === 0 &&
-                (sectionIds || []).includes("dailyset") &&
-                /rewards\.bing\.com\/dashboard/i.test(location.href)
-              ) {
-                sectionCards.push(...collectDashboardFallbackCards(debug));
-              }
-              const cards = collectCards(sectionCards);
-              lastDebug = debug;
+              try {
+                attempts++;
+                const debug = [];
+                const sectionCards = (sectionIds || [])
+                  .map((sectionId) => collectSectionCardsById(sectionId, debug))
+                  .flat();
+                if (
+                  sectionCards.length === 0 &&
+                  (sectionIds || []).includes("dailyset") &&
+                  /rewards\.bing\.com\/dashboard/i.test(location.href)
+                ) {
+                  sectionCards.push(...collectDashboardFallbackCards(debug));
+                }
+                const cards = collectCards(sectionCards);
+                lastDebug = debug;
 
-              // Wait for card count to stabilize (2 consecutive same counts)
-              if (cards.length === prevCount) {
-                stableRounds++;
-              } else {
-                stableRounds = 0;
-              }
-              prevCount = cards.length;
+                if (cards.length === prevCount) {
+                  stableRounds++;
+                } else {
+                  stableRounds = 0;
+                }
+                prevCount = cards.length;
 
-              console.log("[Rewards-Debug] getRewardCards: Attempt " + attempts + " - Found " + cards.length + " cards. Stable rounds: " + stableRounds);
-              if ((cards.length > 0 && stableRounds >= 1) || attempts >= maxAttempts) {
+                console.log("[Rewards-Debug] getRewardCards: Attempt " + attempts + " - Found " + cards.length + " cards. Stable rounds: " + stableRounds);
+                if ((cards.length > 0 && stableRounds >= 1) || attempts >= maxAttempts) {
+                  clearInterval(timer);
+                  console.log(
+                    `[Rewards] Actionable cards found across sections: ${cards.length} (from ${sectionCards.length} section cards, after ${attempts} polls)`,
+                  );
+                  resolve({ cards, debug: lastDebug, attempts });
+                }
+              } catch (error) {
                 clearInterval(timer);
-                console.log(
-                  `[Rewards] Actionable cards found across sections: ${cards.length} (from ${sectionCards.length} section cards, after ${attempts} polls)`,
-                );
-                resolve({ cards, debug: lastDebug, attempts });
+                resolve({
+                  cards: [],
+                  debug: [{ sectionId: "scan_error", error: String(error) }],
+                  attempts,
+                  error: String(error),
+                });
               }
             }, pollMs);
           });
         },
       });
+    const scanTimeout = new Promise((resolve) => {
+      scanTimeoutId = setTimeout(() => {
+        resolve([{
+          result: {
+            cards: [],
+            debug: [{ sectionId: "scan_timeout", timeoutMs: scanTimeoutMs }],
+            attempts: 0,
+            error: `reward card scan timed out after ${scanTimeoutMs}ms`,
+          },
+        }]);
+      }, scanTimeoutMs);
+    });
+    const [{ result: scanResult = { cards: [], debug: [] } } = {}] =
+      await Promise.race([scanExecution, scanTimeout]);
+    clearTimeout(scanTimeoutId);
     const rewardCards = Array.isArray(scanResult) ? scanResult : scanResult?.cards;
     const debug = Array.isArray(scanResult?.debug) ? scanResult.debug : [];
     await appendDebugLog("info", "rewards", "Reward card scan diagnostics", {
       tabId,
       sections: debug,
       attempts: scanResult?.attempts,
+      error: scanResult?.error,
       cards: Array.isArray(rewardCards) ? rewardCards.length : 0,
     });
     return Array.isArray(rewardCards) ? rewardCards : [];
   }
 
   async function clickRewardCard(tabId, targetKey, targetSectionIds) {
+    await injectDomHelpers(tabId);
     const [{ result: clickResult = { clicked: false, href: "" } } = {}] =
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -1832,12 +1876,12 @@ async function autoClickRewards() {
               "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
             );
             for (const el of statusEls) {
-              const t = normalizeRewardText(el.textContent || "").toLowerCase();
-              if (isCompletedText(t)) return true;
+              const t = window.normalizeRewardText(el.textContent || "").toLowerCase();
+              if (window.isCompletedText(t)) return true;
             }
 
-            const fullText = normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
-            if (isCompletedText(fullText)) return true;
+            const fullText = window.normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
+            if (window.isCompletedText(fullText)) return true;
             return false;
           }
 
@@ -1894,7 +1938,7 @@ async function autoClickRewards() {
                 card.getAttribute("href") ||
                 card.querySelector("a[href]")?.getAttribute("href") ||
                 "";
-              const text = normalizeRewardText(card.innerText || card.textContent || "");
+              const text = window.normalizeRewardText(card.innerText || card.textContent || "");
               const meta = {
                 href,
                 text,
@@ -1908,7 +1952,7 @@ async function autoClickRewards() {
                 isPressable: card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") || !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
               };
 
-              if (!isActionableRewardCard(meta)) continue;
+              if (!window.isActionableRewardCard(meta)) continue;
               if (seen.has(card)) continue;
               seen.add(card);
               unique.push(card);
@@ -1918,7 +1962,7 @@ async function autoClickRewards() {
               if (seen.has(anchor)) continue;
 
               const href = anchor.getAttribute("href") || "";
-              const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
+              const text = window.normalizeRewardText(anchor.innerText || anchor.textContent || "");
               const meta = {
                 href,
                 text,
@@ -1932,7 +1976,7 @@ async function autoClickRewards() {
                 isPressable: true,
               };
 
-              if (!isActionableRewardCard(meta)) continue;
+              if (!window.isActionableRewardCard(meta)) continue;
               seen.add(anchor);
               unique.push(anchor);
             }
@@ -1946,15 +1990,19 @@ async function autoClickRewards() {
           }
 
           function collectDashboardFallbackCards() {
-            const anchors = Array.from(
-              document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
+            const roundedAnchors = Array.from(
+              document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
+            );
+            const pressableRewardAnchors = Array.from(
+              document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
             ).filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
+            const anchors = [...new Set([...roundedAnchors, ...pressableRewardAnchors])];
 
             const unique = [];
             const seen = new Set();
             for (const anchor of anchors) {
               const href = anchor.getAttribute("href") || "";
-              const text = normalizeRewardText(anchor.innerText || anchor.textContent || "");
+              const text = window.normalizeRewardText(anchor.innerText || anchor.textContent || "");
               const meta = {
                 href,
                 text,
@@ -1968,7 +2016,7 @@ async function autoClickRewards() {
                 isPressable: true,
               };
 
-              if (!isActionableRewardCard(meta)) continue;
+              if (!window.isActionableRewardCard(meta)) continue;
               const key = buildCardKey(anchor);
               if (seen.has(key)) continue;
               seen.add(key);
@@ -1993,7 +2041,7 @@ async function autoClickRewards() {
               card.querySelector("img[alt]");
             const rawTitle =
               titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
-            return buildRewardCardKey({
+            return window.buildRewardCardKey({
               href,
               title: rawTitle,
               text: card?.innerText || card?.textContent || "",
@@ -2008,7 +2056,7 @@ async function autoClickRewards() {
               card.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ||
               "";
             const disabled = isDisabled(card) ? "disabled" : "enabled";
-            const status = normalizeRewardText(card?.innerText || card?.textContent || "").toLowerCase();
+            const status = window.normalizeRewardText(card?.innerText || card?.textContent || "").toLowerCase();
             return `${href}|${expanded}|${disabled}|${status}`;
           }
 
@@ -2703,9 +2751,12 @@ async function autoClickRewards() {
             );
 
             const childBaselineIds = await getCurrentTabIdSet();
-            const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
-            const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
-            const targetHref = typeof clickResult === "object" ? clickResult.href : null;
+        const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
+        const structuredClickResult = clickResult && typeof clickResult === "object"
+          ? clickResult
+          : { clicked: !!clickResult, href: "" };
+        const wasClicked = structuredClickResult.clicked;
+        const targetHref = structuredClickResult.href;
 
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
@@ -2823,8 +2874,11 @@ async function autoClickRewards() {
 
         const childBaselineIds = await getCurrentTabIdSet();
         const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
-        const wasClicked = typeof clickResult === "object" ? clickResult.clicked : clickResult;
-        const resultHref = typeof clickResult === "object" ? clickResult.href : "";
+        const structuredClickResult = clickResult && typeof clickResult === "object"
+          ? clickResult
+          : { clicked: !!clickResult, href: "" };
+        const wasClicked = structuredClickResult.clicked;
+        const resultHref = structuredClickResult.href;
 
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
