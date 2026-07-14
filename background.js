@@ -21,10 +21,11 @@ const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const KEEPALIVE_ALARM = "keepAlive";
 const DEFAULT_RUN_TIME = "01:00";
 const INTERNET_RETRY_ALARM = "internetRetry";
-const EARLY_INTERNET_CHECK_ALARM = "earlyInternetCheck";
+const DELAYED_START_ALARM = "delayedStartRun";
 const INTERNET_RETRY_MINUTES = 1;
-const EARLY_CHECK_START_HOUR = 1;
-const EARLY_CHECK_END_HOUR = 5;
+const PROFILE_SLOT_MAX = 100;
+const SLOT_SPACING_MINUTES = 10;
+const DELAYED_RUN_SOURCE_KEY = "delayedRunSource";
 const LAST_SUCCESSFUL_RUN_DATE_KEY = "lastSuccessfulRunDate";
 const INTERNET_CHECK_URLS = [
   "https://www.bing.com/favicon.ico",
@@ -166,11 +167,31 @@ function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-function computeNextRunDate(timeHHMM) {
+function normalizeProfileSlot(value) {
+  const slot = Number.parseInt(value, 10);
+  if (!Number.isFinite(slot) || slot < 1 || slot > PROFILE_SLOT_MAX) return 0;
+  return slot;
+}
+
+async function getProfileSlot() {
+  const data = await chrome.storage.local.get({ profileSlot: 0 });
+  return normalizeProfileSlot(data.profileSlot);
+}
+
+function getSlotOffsetMinutes(slot) {
+  const normalizedSlot = normalizeProfileSlot(slot);
+  return normalizedSlot > 0 ? (normalizedSlot - 1) * SLOT_SPACING_MINUTES : 0;
+}
+
+function computeNextRunDate(timeHHMM, slotOffsetMinutes = 0) {
   const [hour, minute] = (timeHHMM || DEFAULT_RUN_TIME).split(":").map(Number);
   const now = new Date();
   const next = new Date();
   next.setHours(hour || 0, minute || 0, 0, 0);
+  next.setMinutes(next.getMinutes() + Math.max(0, slotOffsetMinutes));
+  const previous = new Date(next);
+  previous.setDate(previous.getDate() - 1);
+  if (previous > now) return previous;
   if (next <= now) next.setDate(next.getDate() + 1);
   return next;
 }
@@ -192,25 +213,6 @@ async function markRunCompletedToday() {
   await chrome.storage.local.set({
     [LAST_SUCCESSFUL_RUN_DATE_KEY]: getLocalDateKey(),
   });
-}
-
-function computeNextEarlyInternetCheckDate(now = new Date()) {
-  const next = new Date(now);
-  next.setMinutes(0, 0, 0);
-
-  if (now.getHours() < EARLY_CHECK_START_HOUR) {
-    next.setHours(EARLY_CHECK_START_HOUR, 0, 0, 0);
-    return next;
-  }
-
-  if (now.getHours() <= EARLY_CHECK_END_HOUR) {
-    if (next <= now) next.setHours(next.getHours() + 1, 0, 0, 0);
-    if (next.getHours() <= EARLY_CHECK_END_HOUR) return next;
-  }
-
-  next.setDate(next.getDate() + 1);
-  next.setHours(EARLY_CHECK_START_HOUR, 0, 0, 0);
-  return next;
 }
 
 async function isInternetAvailable() {
@@ -251,6 +253,46 @@ async function scheduleInternetRetry(reason = "unknown") {
 
 async function clearInternetRetry() {
   await chrome.alarms.clear(INTERNET_RETRY_ALARM);
+}
+
+async function clearDelayedStart() {
+  await chrome.alarms.clear(DELAYED_START_ALARM);
+  await chrome.storage.local.remove(DELAYED_RUN_SOURCE_KEY);
+}
+
+async function scheduleStaggeredStart(source) {
+  if (await hasRunToday()) {
+    await clearDelayedStart();
+    return;
+  }
+
+  const profileSlot = await getProfileSlot();
+  const slotOffsetMinutes = getSlotOffsetMinutes(profileSlot);
+  if (slotOffsetMinutes === 0) {
+    await startRun(source);
+    return;
+  }
+
+  const existingAlarm = await chrome.alarms.get(DELAYED_START_ALARM);
+  if (existingAlarm) {
+    await appendDebugLog("info", "scheduler", "Delayed start already scheduled", {
+      profileSlot,
+      slotOffsetMinutes,
+      source,
+      scheduledAt: existingAlarm.scheduledTime,
+    });
+    return;
+  }
+
+  const scheduledAt = Date.now() + slotOffsetMinutes * 60 * 1000;
+  await chrome.storage.local.set({ [DELAYED_RUN_SOURCE_KEY]: source });
+  await chrome.alarms.create(DELAYED_START_ALARM, { when: scheduledAt });
+  await appendDebugLog("info", "scheduler", "Staggered start scheduled", {
+    profileSlot,
+    slotOffsetMinutes,
+    source,
+    scheduledAt,
+  });
 }
 
 function createInternetUnavailableError(context) {
@@ -3656,8 +3698,15 @@ async function startRun(source = "unknown") {
         return;
       }
 
-      console.log(`[Run] Started from ${source}`);
-      await appendDebugLog("info", "run", "Run started", { source });
+      const profileSlot = await getProfileSlot();
+      const slotOffsetMinutes = getSlotOffsetMinutes(profileSlot);
+      console.log(`[Run] Started from ${source}`, { profileSlot, slotOffsetMinutes });
+      await appendDebugLog("info", "run", "Run started", {
+        profileSlot,
+        slotOffsetMinutes,
+        source,
+        scheduledAt: Date.now(),
+      });
       await startKeepAlive();
       await ensureInternetOrThrow("before_run");
       await clearInternetRetry();
@@ -3670,6 +3719,7 @@ async function startRun(source = "unknown") {
       }
     } finally {
       await stopKeepAlive();
+      await clearDelayedStart();
       runPromise = null;
       console.log(`[Run] Finished from ${source}`);
       await appendDebugLog("info", "run", "Run finished", { source });
@@ -3679,34 +3729,33 @@ async function startRun(source = "unknown") {
 }
 
 // ---------------- Scheduling ----------------
-async function scheduleAlarm() {
+async function scheduleAlarm({ clearDelayed = false } = {}) {
   const cfg = await getConfig();
   await chrome.alarms.clear(ALARM_NAME);
 
   if (!cfg.enabled) {
+    await clearDelayedStart();
     await clearInternetRetry();
-    await chrome.alarms.clear(EARLY_INTERNET_CHECK_ALARM);
     await chrome.storage.sync.set({ nextRunAt: null });
     await updateBadge();
     return;
   }
 
-  const next = computeNextRunDate(cfg.time);
+  if (clearDelayed) await clearDelayedStart();
+
+  const profileSlot = await getProfileSlot();
+  const slotOffsetMinutes = getSlotOffsetMinutes(profileSlot);
+  const next = computeNextRunDate(cfg.time, slotOffsetMinutes);
   chrome.alarms.create(ALARM_NAME, { when: next.getTime() });
   await chrome.storage.sync.set({ nextRunAt: next.getTime() });
   await updateBadge();
-  console.log("Next run scheduled at:", next.toString());
-}
-
-async function scheduleEarlyInternetCheck() {
-  const cfg = await getConfig();
-  await chrome.alarms.clear(EARLY_INTERNET_CHECK_ALARM);
-
-  if (!cfg.enabled) return;
-
-  const next = computeNextEarlyInternetCheckDate();
-  await chrome.alarms.create(EARLY_INTERNET_CHECK_ALARM, { when: next.getTime() });
-  console.log("Next early internet check scheduled at:", next.toString());
+  console.log("Next run scheduled at:", next.toString(), { profileSlot, slotOffsetMinutes });
+  await appendDebugLog("info", "scheduler", "Next run scheduled", {
+    profileSlot,
+    slotOffsetMinutes,
+    source: "daily_alarm",
+    scheduledAt: next.getTime(),
+  });
 }
 
 async function handleInternetRetry() {
@@ -3718,26 +3767,12 @@ async function handleInternetRetry() {
 
   if (await isInternetAvailable()) {
     await clearInternetRetry();
-    await startRun("internet_retry");
     await scheduleAlarm();
-    await scheduleEarlyInternetCheck();
+    await scheduleStaggeredStart("internet_retry");
     return;
   }
 
   await scheduleInternetRetry("retry_check");
-}
-
-async function handleEarlyInternetCheck() {
-  const cfg = await getConfig();
-  if (!cfg.enabled || await hasRunToday()) return;
-
-  if (await isInternetAvailable()) {
-    await startRun("early_internet_check");
-    await scheduleAlarm();
-    return;
-  }
-
-  await scheduleInternetRetry("early_internet_check");
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -3748,20 +3783,27 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_NAME) {
     await startRun("alarm");
     await scheduleAlarm();
-    await scheduleEarlyInternetCheck();
     return;
   }
   if (alarm.name === INTERNET_RETRY_ALARM) {
     await handleInternetRetry();
     return;
   }
-  if (alarm.name === EARLY_INTERNET_CHECK_ALARM) {
-    await handleEarlyInternetCheck();
-    await scheduleEarlyInternetCheck();
+  if (alarm.name === DELAYED_START_ALARM) {
+    const data = await chrome.storage.local.get(DELAYED_RUN_SOURCE_KEY);
+    const source = data[DELAYED_RUN_SOURCE_KEY] || "unknown";
+    await clearDelayedStart();
+    await startRun(`delayed_${source}`);
+    await scheduleAlarm();
+    return;
   }
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && "profileSlot" in changes) {
+    scheduleAlarm({ clearDelayed: true });
+    return;
+  }
   if (area !== "sync") return;
   const relevant = [
     "enabled",
@@ -3772,8 +3814,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     "customQueriesRaw",
   ];
   if (relevant.some((k) => k in changes)) {
-    scheduleAlarm();
-    scheduleEarlyInternetCheck();
+    scheduleAlarm({ clearDelayed: true });
   }
   if (
     "nextRunAt" in changes ||
@@ -3787,7 +3828,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "RESCHEDULE") {
-    Promise.all([scheduleAlarm(), scheduleEarlyInternetCheck()])
+    scheduleAlarm({ clearDelayed: true })
       .then(() => sendResponse?.({ ok: true }))
       .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
     return true;
@@ -3820,12 +3861,10 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.sync.set(updates);
   }
 
-  await scheduleAlarm();
-  await scheduleEarlyInternetCheck();
+  await scheduleAlarm({ clearDelayed: true });
   await updateBadge();
   await ensureRunTicker();
 });
 
 scheduleAlarm();
-scheduleEarlyInternetCheck();
 updateBadge();

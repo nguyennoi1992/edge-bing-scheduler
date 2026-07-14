@@ -9,6 +9,8 @@
     button { margin-top: 15px; padding: 8px 12px; }
     .row { display: flex; gap: 10px; }
     .row input { flex: 1; }
+    .hint { margin: 5px 0 0; color: #555; font-size: 0.9em; }
+    #schedulePreview { margin-top: 6px; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -21,6 +23,11 @@
 
     <label for="time">Run time (HH:MM)</label>
     <input id="time" type="time" value="01:00" />
+
+    <label for="profileSlot">Profile Slot (optional)</label>
+    <input id="profileSlot" type="number" min="0" max="100" placeholder="0" />
+    <p class="hint">Leave blank or enter 0 to run normally. Each additional slot adds 10 minutes.</p>
+    <p id="schedulePreview">Runs at 01:00</p>
 
     <label for="count">Number of searches per run</label>
     <input id="count" type="number" min="1" max="100" value="10" />
