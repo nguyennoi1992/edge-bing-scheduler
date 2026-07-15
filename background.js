@@ -7,7 +7,9 @@ import {
   isActionableQuestActivity,
   isActionableRewardCard,
   isCompletedText,
+  isDashboardRewardHref,
   normalizeRewardText,
+  shouldFinishEmptyRewardScan,
 } from "./reward-dom-helpers.js";
 
 const ALARM_NAME = "bingScheduler";
@@ -342,7 +344,9 @@ async function injectDomHelpers(tabId) {
         typeof window.buildRewardCardKey === "function" &&
         typeof window.buildQuestCardKey === "function" &&
         typeof window.isActionableQuestActivity === "function" &&
-        typeof window.buildQuestActivityKey === "function";
+        typeof window.buildQuestActivityKey === "function" &&
+        typeof window.isDashboardRewardHref === "function" &&
+        typeof window.shouldFinishEmptyRewardScan === "function";
       if (window.__rewardDomHelpersInjected && helpersReady) return;
       window.__rewardDomHelpersInjected = true;
 
@@ -355,6 +359,29 @@ async function injectDomHelpers(tabId) {
 
       window.isCompletedText = function isCompletedText(value) {
         return COMPLETED_RE.test(window.normalizeRewardText(value).toLowerCase());
+      };
+
+      window.isDashboardRewardHref = function isDashboardRewardHref(href) {
+        const value = href || "";
+        return (
+          /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(value) ||
+          /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(value)
+        );
+      };
+
+      window.shouldFinishEmptyRewardScan = function shouldFinishEmptyRewardScan({
+        readyState,
+        hasTargetSection,
+        count,
+        stableEmptyRounds,
+        requiredStableRounds = 5,
+      } = {}) {
+        return (
+          readyState === "complete" &&
+          hasTargetSection === true &&
+          count === 0 &&
+          stableEmptyRounds >= requiredStableRounds
+        );
       };
 
       const QUEST_HEADING_RE = /^(activities|ho\u1ea1t \u0111\u1ed9ng|tareas|activit\u00e9s|aufgaben)$/i;
@@ -832,13 +859,16 @@ async function autoClickRewards() {
             let attempts = 0;
             let prevCount = -1;
             let stableRounds = 0;
+            let stableEmptyRounds = 0;
             let last = {
               readyState: document.readyState,
               hasDailyset: false,
+              hasTargetSection: false,
               sectionCards: 0,
               fallbackCards: 0,
               count: 0,
               attempts: 0,
+              stableEmptyRounds: 0,
             };
 
             const normalizeText = (value) =>
@@ -857,10 +887,6 @@ async function autoClickRewards() {
                 style.display !== "none"
               );
             };
-
-            const isDashboardRewardHref = (href) =>
-              /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(href || "") ||
-              /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(href || "");
 
             const expandSectionIfCollapsed = (section) => {
               if (!section) return;
@@ -896,7 +922,7 @@ async function autoClickRewards() {
               Array.from(
                 document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
               )
-                .filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""))
+                .filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""))
                 .filter(isPendingCard)
                 .length;
 
@@ -914,14 +940,23 @@ async function autoClickRewards() {
                   ? countFallbackCards()
                   : 0;
               const count = Math.max(sectionCards, fallbackCards);
+              const hasTargetSection = sections.length > 0;
+
+              if (document.readyState === "complete" && hasTargetSection && count === 0) {
+                stableEmptyRounds++;
+              } else {
+                stableEmptyRounds = 0;
+              }
 
               last = {
                 readyState: document.readyState,
                 hasDailyset: !!dailyset,
+                hasTargetSection,
                 sectionCards,
                 fallbackCards,
                 count,
                 attempts,
+                stableEmptyRounds,
               };
 
               if (document.readyState === "complete" && count > 0) {
@@ -935,6 +970,10 @@ async function autoClickRewards() {
                 }
               } else {
                 stableRounds = 0;
+              }
+
+              if (window.shouldFinishEmptyRewardScan(last)) {
+                return { ready: true, reason: "stable_empty", stableRounds, ...last };
               }
 
               prevCount = count;
@@ -1690,11 +1729,6 @@ async function autoClickRewards() {
               return unique;
             }
 
-            function isDashboardRewardHref(href) {
-              return /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(href || "") ||
-                /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(href || "");
-            }
-
             function collectDashboardFallbackCards(debugSections) {
               const sectionDebug = {
                 sectionId: "dashboard_fallback",
@@ -1710,10 +1744,10 @@ async function autoClickRewards() {
 
               const roundedAnchors = Array.from(
                 document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
-              );
+              ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
               const pressableRewardAnchors = Array.from(
                 document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
-              ).filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
+              ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
               const anchors = [...new Set([...roundedAnchors, ...pressableRewardAnchors])];
               sectionDebug.cardRoots = anchors.length;
 
@@ -1813,6 +1847,7 @@ async function autoClickRewards() {
             const pollMs = 1500;
             let prevCount = -1;
             let stableRounds = 0;
+            let stableEmptyRounds = 0;
             let lastDebug = [];
 
             const timer = setInterval(() => {
@@ -1831,6 +1866,9 @@ async function autoClickRewards() {
                 }
                 const cards = collectCards(sectionCards);
                 lastDebug = debug;
+                const hasTargetSection = (sectionIds || []).some(
+                  (sectionId) => sectionId === "global" || !!document.getElementById(sectionId),
+                );
 
                 if (cards.length === prevCount) {
                   stableRounds++;
@@ -1839,13 +1877,32 @@ async function autoClickRewards() {
                 }
                 prevCount = cards.length;
 
-                console.log("[Rewards-Debug] getRewardCards: Attempt " + attempts + " - Found " + cards.length + " cards. Stable rounds: " + stableRounds);
-                if ((cards.length > 0 && stableRounds >= 1) || attempts >= maxAttempts) {
+                if (document.readyState === "complete" && hasTargetSection && cards.length === 0) {
+                  stableEmptyRounds++;
+                } else {
+                  stableEmptyRounds = 0;
+                }
+
+                const stableEmpty = window.shouldFinishEmptyRewardScan({
+                  readyState: document.readyState,
+                  hasTargetSection,
+                  count: cards.length,
+                  stableEmptyRounds,
+                });
+
+                console.log("[Rewards-Debug] getRewardCards: Attempt " + attempts + " - Found " + cards.length + " cards. Stable rounds: " + stableRounds + ", stable empty rounds: " + stableEmptyRounds);
+                if ((cards.length > 0 && stableRounds >= 1) || stableEmpty || attempts >= maxAttempts) {
                   clearInterval(timer);
                   console.log(
                     `[Rewards] Actionable cards found across sections: ${cards.length} (from ${sectionCards.length} section cards, after ${attempts} polls)`,
                   );
-                  resolve({ cards, debug: lastDebug, attempts });
+                  resolve({
+                    cards,
+                    debug: lastDebug,
+                    attempts,
+                    reason: stableEmpty ? "stable_empty" : cards.length > 0 ? "stable_cards" : "max_attempts",
+                    stableEmptyRounds,
+                  });
                 }
               } catch (error) {
                 clearInterval(timer);
@@ -1881,6 +1938,8 @@ async function autoClickRewards() {
       tabId,
       sections: debug,
       attempts: scanResult?.attempts,
+      reason: scanResult?.reason,
+      stableEmptyRounds: scanResult?.stableEmptyRounds,
       error: scanResult?.error,
       cards: Array.isArray(rewardCards) ? rewardCards.length : 0,
     });
@@ -2055,18 +2114,13 @@ async function autoClickRewards() {
             return unique;
           }
 
-          function isDashboardRewardHref(href) {
-            return /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(href || "") ||
-              /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(href || "");
-          }
-
           function collectDashboardFallbackCards() {
             const roundedAnchors = Array.from(
               document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
-            );
+            ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
             const pressableRewardAnchors = Array.from(
               document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
-            ).filter((anchor) => isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
+            ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
             const anchors = [...new Set([...roundedAnchors, ...pressableRewardAnchors])];
 
             const unique = [];
@@ -2983,17 +3037,24 @@ async function autoClickRewards() {
       const cardAttemptCounts = new Map();
       const discoveredRewardCards = new Map();
       const maxRewardCardClicks = 8;
+      let skipWaitNextRound = false;
       for (let i = 0; i < maxRewardCardClicks; i++) {
         if (timedOut()) {
           console.warn("[Rewards] Timeout budget reached while clicking reward cards for " + url);
           await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards, continuing...", { url, processed: i });
         }
 
-        await waitForRewardsDomReady(
-          tab.id,
-          targetSectionIds,
-          /rewards\.bing\.com\/dashboard/i.test(url) ? 45000 : 20000,
-        );
+        if (!skipWaitNextRound) {
+          const timeoutMs = /rewards\.bing\.com\/dashboard/i.test(url)
+            ? (discoveredRewardCards.size > 0 ? 15000 : 45000)
+            : 20000;
+          await waitForRewardsDomReady(
+            tab.id,
+            targetSectionIds,
+            timeoutMs,
+          );
+        }
+        skipWaitNextRound = false;
         const rewardCardsResult = await getRewardCards(tab.id, targetSectionIds);
         const rewardCards = Array.isArray(rewardCardsResult) ? rewardCardsResult : [];
         for (const discoveredCard of rewardCards) {
@@ -3011,6 +3072,7 @@ async function autoClickRewards() {
             (candidate) => (cardAttemptCounts.get(candidate.key) || 0) < 1,
           );
           if (card) {
+            skipWaitNextRound = true;
             await appendDebugLog("warn", "rewards", "Using previously discovered reward card after empty re-scan", {
               href: card.href.substring(0, 80),
               queued: discoveredRewardCards.size,

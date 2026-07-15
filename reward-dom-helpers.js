@@ -14,6 +14,29 @@ export function isCompletedText(value) {
   return COMPLETED_RE.test(normalizeRewardText(value).toLowerCase());
 }
 
+export function isDashboardRewardHref(href) {
+  const value = href || "";
+  return (
+    /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(value) ||
+    /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(value)
+  );
+}
+
+export function shouldFinishEmptyRewardScan({
+  readyState,
+  hasTargetSection,
+  count,
+  stableEmptyRounds,
+  requiredStableRounds = 5,
+} = {}) {
+  return (
+    readyState === "complete" &&
+    hasTargetSection === true &&
+    count === 0 &&
+    stableEmptyRounds >= requiredStableRounds
+  );
+}
+
 export function isActionableRewardCard(meta) {
   const href = meta.href || "";
   const text = normalizeRewardText(meta.text).toLowerCase();
