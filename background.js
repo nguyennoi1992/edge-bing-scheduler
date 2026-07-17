@@ -11,6 +11,7 @@ import {
   normalizeRewardText,
   shouldFinishEmptyRewardScan,
 } from "./reward-dom-helpers.js";
+import { getFirstScriptResult } from "./script-result-helpers.js";
 
 const ALARM_NAME = "bingScheduler";
 const BADGE_ALARM = "badgeTick";
@@ -458,7 +459,7 @@ async function autoClickRewards() {
   ];
 
   async function claimReadyPoints(tabId) {
-    const [{ result: claimResult = { clicked: false, claimedPoints: 0 } }] =
+    const scriptResults =
       await chrome.scripting.executeScript({
         target: { tabId },
         world: "MAIN",
@@ -642,7 +643,11 @@ async function autoClickRewards() {
         },
       });
 
-    return claimResult;
+    return getFirstScriptResult(scriptResults, {
+      clicked: false,
+      claimedPoints: 0,
+      reason: "missing_result",
+    });
   }
 
   async function closeChildTabs(parentTabId, rounds = 4, delayMs = 1200, windowId = undefined) {
@@ -847,7 +852,7 @@ async function autoClickRewards() {
       await waitForTabComplete(tabId);
       await ensureTabFocused(tabId);
 
-      const [{ result = { ready: false, count: 0, reason: "missing_result" } } = {}] =
+      const scriptRes =
         await chrome.scripting.executeScript({
           target: { tabId },
           world: "MAIN",
@@ -984,6 +989,11 @@ async function autoClickRewards() {
           },
         });
 
+      const result = getFirstScriptResult(scriptRes, {
+        ready: false,
+        count: 0,
+        reason: "missing_result",
+      });
       await appendDebugLog(result.ready ? "info" : "warn", "rewards", "Rewards DOM ready check", {
         tabId,
         timeoutMs,
@@ -1929,9 +1939,14 @@ async function autoClickRewards() {
         }]);
       }, scanTimeoutMs);
     });
-    const [{ result: scanResult = { cards: [], debug: [] } } = {}] =
-      await Promise.race([scanExecution, scanTimeout]);
+    const scanResults = await Promise.race([scanExecution, scanTimeout]);
     clearTimeout(scanTimeoutId);
+    const scanResult = getFirstScriptResult(scanResults, {
+      cards: [],
+      debug: [{ sectionId: "missing_result" }],
+      attempts: 0,
+      reason: "missing_result",
+    });
     const rewardCards = Array.isArray(scanResult) ? scanResult : scanResult?.cards;
     const debug = Array.isArray(scanResult?.debug) ? scanResult.debug : [];
     await appendDebugLog("info", "rewards", "Reward card scan diagnostics", {
@@ -1948,7 +1963,7 @@ async function autoClickRewards() {
 
   async function clickRewardCard(tabId, targetKey, targetSectionIds) {
     await injectDomHelpers(tabId);
-    const [{ result: clickResult = { clicked: false, href: "" } } = {}] =
+    const scriptResults =
       await chrome.scripting.executeScript({
         target: { tabId },
         world: "MAIN",
@@ -2436,12 +2451,16 @@ async function autoClickRewards() {
         },
       });
 
-    return clickResult;
+    return getFirstScriptResult(scriptResults, {
+      clicked: false,
+      href: "",
+      reason: "missing_result",
+    });
   }
 
   async function handleRewardChildTab(tabId) {
     try {
-      const [{ result = { handled: false, completed: false, clicks: 0, reason: "unknown" } }] =
+      const scriptResults =
         await chrome.scripting.executeScript({
           target: { tabId },
           world: "MAIN",
@@ -2677,7 +2696,12 @@ async function autoClickRewards() {
           },
         });
 
-      return result;
+      return getFirstScriptResult(scriptResults, {
+        handled: false,
+        completed: false,
+        clicks: 0,
+        reason: "missing_result",
+      });
     } catch (e) {
       return { handled: false, completed: false, clicks: 0, reason: e?.message || "script_failed" };
     }
