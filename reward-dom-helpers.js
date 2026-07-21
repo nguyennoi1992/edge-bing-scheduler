@@ -5,6 +5,8 @@ export function normalizeRewardText(value) {
 const COMPLETED_RE =
   /\bcompleted\b|\bdone\b|hoàn thành|đã xong|已完成|完了|terminé|abgeschlossen|completado|завершено/i;
 
+export const EMPTY_REWARD_STABLE_MS = 20_000;
+
 const QUEST_HEADING_RE = /^(activities|hoạt động|tareas|activités|aufgaben)$/i;
 const QUEST_META_RE = /^(status:|expires:|trạng thái:|hết hạn:)/i;
 const QUEST_CHROME_RE = /^(feedback|privacy|terms|microsoft|bing|search)$/i;
@@ -26,14 +28,14 @@ export function shouldFinishEmptyRewardScan({
   readyState,
   hasTargetSection,
   count,
-  stableEmptyRounds,
-  requiredStableRounds = 5,
+  stableEmptyMs,
+  requiredStableMs = EMPTY_REWARD_STABLE_MS,
 } = {}) {
   return (
     readyState === "complete" &&
     hasTargetSection === true &&
     count === 0 &&
-    stableEmptyRounds >= requiredStableRounds
+    stableEmptyMs >= requiredStableMs
   );
 }
 

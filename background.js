@@ -1,6 +1,7 @@
 // Use as an ES module for MV3 service worker
 import { buildQueries } from "./words.js";
 import {
+  EMPTY_REWARD_STABLE_MS,
   buildQuestActivityKey,
   buildQuestCardKey,
   buildRewardCardKey,
@@ -337,7 +338,8 @@ async function injectDomHelpers(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: () => {
+    args: [EMPTY_REWARD_STABLE_MS],
+    func: (emptyRewardStableMs) => {
       const helpersReady =
         typeof window.normalizeRewardText === "function" &&
         typeof window.isCompletedText === "function" &&
@@ -374,14 +376,14 @@ async function injectDomHelpers(tabId) {
         readyState,
         hasTargetSection,
         count,
-        stableEmptyRounds,
-        requiredStableRounds = 5,
+        stableEmptyMs,
+        requiredStableMs = emptyRewardStableMs,
       } = {}) {
         return (
           readyState === "complete" &&
           hasTargetSection === true &&
           count === 0 &&
-          stableEmptyRounds >= requiredStableRounds
+          stableEmptyMs >= requiredStableMs
         );
       };
 
@@ -864,7 +866,7 @@ async function autoClickRewards() {
             let attempts = 0;
             let prevCount = -1;
             let stableRounds = 0;
-            let stableEmptyRounds = 0;
+            let stableEmptySince = null;
             let last = {
               readyState: document.readyState,
               hasDailyset: false,
@@ -873,7 +875,8 @@ async function autoClickRewards() {
               fallbackCards: 0,
               count: 0,
               attempts: 0,
-              stableEmptyRounds: 0,
+              stableEmptySince: null,
+              stableEmptyMs: 0,
             };
 
             const normalizeText = (value) =>
@@ -947,11 +950,13 @@ async function autoClickRewards() {
               const count = Math.max(sectionCards, fallbackCards);
               const hasTargetSection = sections.length > 0;
 
+              const now = Date.now();
               if (document.readyState === "complete" && hasTargetSection && count === 0) {
-                stableEmptyRounds++;
+                if (stableEmptySince === null) stableEmptySince = now;
               } else {
-                stableEmptyRounds = 0;
+                stableEmptySince = null;
               }
+              const stableEmptyMs = stableEmptySince === null ? 0 : now - stableEmptySince;
 
               last = {
                 readyState: document.readyState,
@@ -961,7 +966,8 @@ async function autoClickRewards() {
                 fallbackCards,
                 count,
                 attempts,
-                stableEmptyRounds,
+                stableEmptySince,
+                stableEmptyMs,
               };
 
               if (document.readyState === "complete" && count > 0) {
@@ -1486,15 +1492,15 @@ async function autoClickRewards() {
     return clicked;
   }
 
-  async function getRewardCards(tabId, targetSectionIds) {
+  async function getRewardCards(tabId, targetSectionIds, initialStableEmptySince = null) {
     await injectDomHelpers(tabId);
     const scanTimeoutMs = 40000;
     let scanTimeoutId;
     const scanExecution = chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      args: [targetSectionIds || rewardSectionIds],
-      func: (sectionIds) => {
+      args: [targetSectionIds || rewardSectionIds, initialStableEmptySince],
+      func: (sectionIds, carriedStableEmptySince) => {
         return new Promise((resolve) => {
           const isVisible = (el) => {
             if (!el || typeof el.getBoundingClientRect !== "function") return false;
@@ -1857,7 +1863,10 @@ async function autoClickRewards() {
             const pollMs = 1500;
             let prevCount = -1;
             let stableRounds = 0;
-            let stableEmptyRounds = 0;
+            let stableEmptySince =
+              Number.isFinite(carriedStableEmptySince) && carriedStableEmptySince <= Date.now()
+                ? carriedStableEmptySince
+                : null;
             let lastDebug = [];
 
             const timer = setInterval(() => {
@@ -1887,20 +1896,22 @@ async function autoClickRewards() {
                 }
                 prevCount = cards.length;
 
+                const now = Date.now();
                 if (document.readyState === "complete" && hasTargetSection && cards.length === 0) {
-                  stableEmptyRounds++;
+                  if (stableEmptySince === null) stableEmptySince = now;
                 } else {
-                  stableEmptyRounds = 0;
+                  stableEmptySince = null;
                 }
+                const stableEmptyMs = stableEmptySince === null ? 0 : now - stableEmptySince;
 
                 const stableEmpty = window.shouldFinishEmptyRewardScan({
                   readyState: document.readyState,
                   hasTargetSection,
                   count: cards.length,
-                  stableEmptyRounds,
+                  stableEmptyMs,
                 });
 
-                console.log("[Rewards-Debug] getRewardCards: Attempt " + attempts + " - Found " + cards.length + " cards. Stable rounds: " + stableRounds + ", stable empty rounds: " + stableEmptyRounds);
+                console.log("[Rewards-Debug] getRewardCards: Attempt " + attempts + " - Found " + cards.length + " cards. Stable rounds: " + stableRounds + ", stable empty ms: " + stableEmptyMs);
                 if ((cards.length > 0 && stableRounds >= 1) || stableEmpty || attempts >= maxAttempts) {
                   clearInterval(timer);
                   console.log(
@@ -1911,7 +1922,8 @@ async function autoClickRewards() {
                     debug: lastDebug,
                     attempts,
                     reason: stableEmpty ? "stable_empty" : cards.length > 0 ? "stable_cards" : "max_attempts",
-                    stableEmptyRounds,
+                    stableEmptySince,
+                    stableEmptyMs,
                   });
                 }
               } catch (error) {
@@ -1954,7 +1966,7 @@ async function autoClickRewards() {
       sections: debug,
       attempts: scanResult?.attempts,
       reason: scanResult?.reason,
-      stableEmptyRounds: scanResult?.stableEmptyRounds,
+      stableEmptyMs: scanResult?.stableEmptyMs,
       error: scanResult?.error,
       cards: Array.isArray(rewardCards) ? rewardCards.length : 0,
     });
@@ -3068,18 +3080,26 @@ async function autoClickRewards() {
           await appendDebugLog("warn", "rewards", "Timeout budget reached for reward cards, continuing...", { url, processed: i });
         }
 
+        let initialStableEmptySince = null;
         if (!skipWaitNextRound) {
           const timeoutMs = /rewards\.bing\.com\/dashboard/i.test(url)
             ? (discoveredRewardCards.size > 0 ? 15000 : 45000)
             : 20000;
-          await waitForRewardsDomReady(
+          const domReadyResult = await waitForRewardsDomReady(
             tab.id,
             targetSectionIds,
             timeoutMs,
           );
+          initialStableEmptySince = Number.isFinite(domReadyResult?.stableEmptySince)
+            ? domReadyResult.stableEmptySince
+            : null;
         }
         skipWaitNextRound = false;
-        const rewardCardsResult = await getRewardCards(tab.id, targetSectionIds);
+        const rewardCardsResult = await getRewardCards(
+          tab.id,
+          targetSectionIds,
+          initialStableEmptySince,
+        );
         const rewardCards = Array.isArray(rewardCardsResult) ? rewardCardsResult : [];
         for (const discoveredCard of rewardCards) {
           discoveredRewardCards.set(discoveredCard.key, discoveredCard);

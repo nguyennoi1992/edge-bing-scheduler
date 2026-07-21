@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  EMPTY_REWARD_STABLE_MS,
   isDashboardRewardHref,
   shouldFinishEmptyRewardScan,
 } from "../reward-dom-helpers.js";
@@ -36,29 +37,32 @@ test("dashboard reward href filter rejects Rewards navigation links", () => {
   }
 });
 
-test("stable empty scan finishes only after the target section is ready", () => {
+test("stable empty scan finishes only after 20 seconds with the target section ready", () => {
   const readyEmpty = {
     readyState: "complete",
     hasTargetSection: true,
     count: 0,
-    stableEmptyRounds: 5,
+    stableEmptyMs: EMPTY_REWARD_STABLE_MS,
   };
 
   assert.equal(shouldFinishEmptyRewardScan(readyEmpty), true);
   assert.equal(shouldFinishEmptyRewardScan({ ...readyEmpty, readyState: "loading" }), false);
   assert.equal(shouldFinishEmptyRewardScan({ ...readyEmpty, hasTargetSection: false }), false);
   assert.equal(shouldFinishEmptyRewardScan({ ...readyEmpty, count: 1 }), false);
-  assert.equal(shouldFinishEmptyRewardScan({ ...readyEmpty, stableEmptyRounds: 4 }), false);
+  assert.equal(
+    shouldFinishEmptyRewardScan({ ...readyEmpty, stableEmptyMs: EMPTY_REWARD_STABLE_MS - 1 }),
+    false,
+  );
 });
 
-test("stable empty scan supports an explicit round threshold", () => {
+test("stable empty scan supports an explicit time threshold", () => {
   assert.equal(
     shouldFinishEmptyRewardScan({
       readyState: "complete",
       hasTargetSection: true,
       count: 0,
-      stableEmptyRounds: 2,
-      requiredStableRounds: 2,
+      stableEmptyMs: 2_000,
+      requiredStableMs: 2_000,
     }),
     true,
   );
