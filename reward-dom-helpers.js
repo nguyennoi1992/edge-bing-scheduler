@@ -7,6 +7,9 @@ const COMPLETED_RE =
 
 export const EMPTY_REWARD_STABLE_MS = 20_000;
 
+export const QUIZ_COMPLETION_RE =
+  /thanks for playing|come back tomorrow|you earned(?:\s+\d+)?(?:\s+points?)?|quiz complete|all done|nice work|thank you for participating|great job|well done|test complete|cảm ơn bạn(?: đã tham gia)?|hoàn thành bài|làm tốt lắm|答题完成|已完成测验|quiz terminé|quiz abgeschlossen|cuestionario completado|тест завершен/i;
+
 const QUEST_HEADING_RE = /^(activities|hoạt động|tareas|activités|aufgaben)$/i;
 const QUEST_META_RE = /^(status:|expires:|trạng thái:|hết hạn:)/i;
 const QUEST_CHROME_RE = /^(feedback|privacy|terms|microsoft|bing|search)$/i;
@@ -16,10 +19,14 @@ export function isCompletedText(value) {
   return COMPLETED_RE.test(normalizeRewardText(value).toLowerCase());
 }
 
+export function findQuizCompletionPhrase(value) {
+  return normalizeRewardText(value).match(QUIZ_COMPLETION_RE)?.[0] || "";
+}
+
 export function isDashboardRewardHref(href) {
   const value = href || "";
   return (
-    /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(value) ||
+    /^https:\/\/(?:www\.)?bing\.com\//i.test(value) ||
     /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(value)
   );
 }
@@ -48,6 +55,7 @@ export function isActionableRewardCard(meta) {
   if (meta.isCompleted) return false;
   if (meta.isInNav) return false;
   if (meta.isQuestCard) return false;
+  if (meta.isHeader) return false;
   if (!meta.hasVisual) return false;
   if (!text) return false;
   if (!href && !meta.isPressable) return false;

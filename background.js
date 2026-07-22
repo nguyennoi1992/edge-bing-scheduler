@@ -2,6 +2,7 @@
 import { buildQueries } from "./words.js";
 import {
   EMPTY_REWARD_STABLE_MS,
+  QUIZ_COMPLETION_RE,
   buildQuestActivityKey,
   buildQuestCardKey,
   buildRewardCardKey,
@@ -367,7 +368,7 @@ async function injectDomHelpers(tabId) {
       window.isDashboardRewardHref = function isDashboardRewardHref(href) {
         const value = href || "";
         return (
-          /^https:\/\/www\.bing\.com\/(?:search|spotlight\/imagepuzzle)\b/i.test(value) ||
+          /^https:\/\/(?:www\.)?bing\.com\//i.test(value) ||
           /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(value)
         );
       };
@@ -908,12 +909,14 @@ async function autoClickRewards() {
 
             const isPendingCard = (anchor) => {
               if (!isVisible(anchor)) return false;
+              if (anchor.closest("nav, header, footer, [role='banner'], #quests")) return false;
               if (anchor.getAttribute("aria-disabled") === "true" || anchor.closest("[aria-disabled='true'], [data-disabled='true']")) {
                 return false;
               }
               const text = normalizeText(anchor.innerText || anchor.textContent || "");
               if (!text || completedText(text)) return false;
               if (/^(see more tasks|earn more)$/i.test(text)) return false;
+              if (!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture")) return false;
               return true;
             };
 
@@ -944,7 +947,10 @@ async function autoClickRewards() {
               const dailyset = document.querySelector("#dailyset");
               const sectionCards = sections.reduce((sum, section) => sum + countSectionCards(section), 0);
               const fallbackCards =
-                ids.includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)
+                (
+                  (ids.includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                  (ids.includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href))
+                )
                   ? countFallbackCards()
                   : 0;
               const count = Math.max(sectionCards, fallbackCards);
@@ -1610,8 +1616,6 @@ async function autoClickRewards() {
 
             function collectSectionCardsById(sectionId, debugSections) {
               let section = null;
-              const clickCompletedCards =
-                sectionId === "dailyset" && /rewards\.bing\.com\/dashboard/i.test(location.href);
               const sectionDebug = {
                 sectionId,
                 exists: true,
@@ -1652,11 +1656,11 @@ async function autoClickRewards() {
                   text,
                   hasVisual: !!card.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                   isDisabled: card.getAttribute("aria-disabled") === "true" || !!card.closest("[aria-disabled='true'], [data-disabled='true']"),
-                  isCompleted: clickCompletedCards ? false : isCardCompleted(card),
+                  isCompleted: isCardCompleted(card),
                   isVisible: isVisible(card),
                   isInNav: !!card.closest("nav, header, footer, [role='banner']"),
                   isQuestCard: !!card.closest("#quests"),
-                  isHeader: card.hasAttribute("slot") || card.hasAttribute("aria-controls") || card.hasAttribute("aria-expanded") || !!card.closest("h1, h2, h3, h4") || !!card.querySelector("h1, h2, h3, h4"),
+                  isHeader: card.matches?.("h1, h2, h3, h4, [slot='trigger'], [aria-expanded][aria-controls]") || !!card.closest("h1, h2, h3, h4"),
                   isPressable: card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") || !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
                 };
                 const isActionable = window.isActionableRewardCard(meta);
@@ -1702,11 +1706,11 @@ async function autoClickRewards() {
                   text,
                   hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                   isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                  isCompleted: clickCompletedCards ? false : isCardCompleted(anchor),
+                  isCompleted: isCardCompleted(anchor),
                   isVisible: isVisible(anchor),
                   isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                   isQuestCard: !!anchor.closest("#quests"),
-                  isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                  isHeader: anchor.matches?.("h1, h2, h3, h4, [slot='trigger'], [aria-expanded][aria-controls]") || !!anchor.closest("h1, h2, h3, h4"),
                   isPressable: true,
                 };
 
@@ -1745,9 +1749,9 @@ async function autoClickRewards() {
               return unique;
             }
 
-            function collectDashboardFallbackCards(debugSections) {
+            function collectPageRewardFallbackCards(debugSections, sectionId) {
               const sectionDebug = {
-                sectionId: "dashboard_fallback",
+                sectionId,
                 exists: true,
                 directRoundedAnchors: document.querySelectorAll(
                   "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
@@ -1755,16 +1759,24 @@ async function autoClickRewards() {
                 cardRoots: 0,
                 accepted: 0,
                 rejected: [],
+                filteredOut: [],
               };
               debugSections.push(sectionDebug);
 
-              const roundedAnchors = Array.from(
-                document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
-              ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
-              const pressableRewardAnchors = Array.from(
-                document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
-              ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
-              const anchors = [...new Set([...roundedAnchors, ...pressableRewardAnchors])];
+              const candidates = [...new Set([
+                ...document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
+                ...document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
+              ])];
+              const anchors = candidates.filter((anchor) =>
+                window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || "")
+              );
+              sectionDebug.filteredOut = candidates
+                .filter((anchor) => !anchors.includes(anchor))
+                .slice(0, 5)
+                .map((anchor) => ({
+                  href: (anchor.getAttribute("href") || "").substring(0, 100),
+                  text: window.normalizeRewardText(anchor.innerText || anchor.textContent || "").substring(0, 100),
+                }));
               sectionDebug.cardRoots = anchors.length;
 
               const unique = [];
@@ -1778,11 +1790,11 @@ async function autoClickRewards() {
                   text,
                   hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                   isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                  isCompleted: false,
+                  isCompleted: isCardCompleted(anchor),
                   isVisible: isVisible(anchor),
                   isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                   isQuestCard: !!anchor.closest("#quests"),
-                  isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                  isHeader: anchor.matches?.("h1, h2, h3, h4, [slot='trigger'], [aria-expanded][aria-controls]") || !!anchor.closest("h1, h2, h3, h4"),
                   isPressable: true,
                 };
 
@@ -1876,12 +1888,19 @@ async function autoClickRewards() {
                 const sectionCards = (sectionIds || [])
                   .map((sectionId) => collectSectionCardsById(sectionId, debug))
                   .flat();
-                if (
-                  sectionCards.length === 0 &&
-                  (sectionIds || []).includes("dailyset") &&
-                  /rewards\.bing\.com\/dashboard/i.test(location.href)
-                ) {
-                  sectionCards.push(...collectDashboardFallbackCards(debug));
+                if (sectionCards.length === 0) {
+                  const isDashboardFallback =
+                    (sectionIds || []).includes("dailyset") &&
+                    /rewards\.bing\.com\/dashboard/i.test(location.href);
+                  const isEarnFallback =
+                    (sectionIds || []).includes("moreactivities") &&
+                    /rewards\.bing\.com\/earn/i.test(location.href);
+                  if (isDashboardFallback || isEarnFallback) {
+                    sectionCards.push(...collectPageRewardFallbackCards(
+                      debug,
+                      isEarnFallback ? "earn_fallback" : "dashboard_fallback",
+                    ));
+                  }
                 }
                 const cards = collectCards(sectionCards);
                 lastDebug = debug;
@@ -1970,7 +1989,13 @@ async function autoClickRewards() {
       error: scanResult?.error,
       cards: Array.isArray(rewardCards) ? rewardCards.length : 0,
     });
-    return Array.isArray(rewardCards) ? rewardCards : [];
+    return {
+      cards: Array.isArray(rewardCards) ? rewardCards : [],
+      reason: scanResult?.reason,
+      sections: debug,
+      stableEmptyMs: scanResult?.stableEmptyMs,
+      error: scanResult?.error,
+    };
   }
 
   async function clickRewardCard(tabId, targetKey, targetSectionIds) {
@@ -2077,8 +2102,6 @@ async function autoClickRewards() {
 
           function collectSectionCardsById(sectionId) {
             let section = null;
-            const clickCompletedCards =
-              sectionId === "dailyset" && /rewards\.bing\.com\/dashboard/i.test(location.href);
             if (sectionId !== "global") {
               section = document.querySelector(`#${sectionId}`);
               if (!section) return [];
@@ -2101,11 +2124,11 @@ async function autoClickRewards() {
                 text,
                 hasVisual: !!card.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                 isDisabled: card.getAttribute("aria-disabled") === "true" || !!card.closest("[aria-disabled='true'], [data-disabled='true']"),
-                isCompleted: clickCompletedCards ? false : isCardCompleted(card),
+                isCompleted: isCardCompleted(card),
                 isVisible: isVisible(card),
                 isInNav: !!card.closest("nav, header, footer, [role='banner']"),
                 isQuestCard: !!card.closest("#quests"),
-                isHeader: card.hasAttribute("slot") || card.hasAttribute("aria-controls") || card.hasAttribute("aria-expanded") || !!card.closest("h1, h2, h3, h4") || !!card.querySelector("h1, h2, h3, h4"),
+                isHeader: card.matches?.("h1, h2, h3, h4, [slot='trigger'], [aria-expanded][aria-controls]") || !!card.closest("h1, h2, h3, h4"),
                 isPressable: card.matches?.("button, [role='button'], [role='link'], [data-react-aria-pressable='true']") || !!card.querySelector("[data-react-aria-pressable='true'], button, [role='button'], [role='link']"),
               };
 
@@ -2125,11 +2148,11 @@ async function autoClickRewards() {
                 text,
                 hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                 isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                isCompleted: clickCompletedCards ? false : isCardCompleted(anchor),
+                isCompleted: isCardCompleted(anchor),
                 isVisible: isVisible(anchor),
                 isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                 isQuestCard: !!anchor.closest("#quests"),
-                isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                isHeader: anchor.matches?.("h1, h2, h3, h4, [slot='trigger'], [aria-expanded][aria-controls]") || !!anchor.closest("h1, h2, h3, h4"),
                 isPressable: true,
               };
 
@@ -2141,14 +2164,13 @@ async function autoClickRewards() {
             return unique;
           }
 
-          function collectDashboardFallbackCards() {
-            const roundedAnchors = Array.from(
-              document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
-            ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
-            const pressableRewardAnchors = Array.from(
-              document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
-            ).filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""));
-            const anchors = [...new Set([...roundedAnchors, ...pressableRewardAnchors])];
+          function collectPageRewardFallbackCards() {
+            const anchors = [...new Set([
+              ...document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
+              ...document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
+            ])].filter((anchor) =>
+              window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || "")
+            );
 
             const unique = [];
             const seen = new Set();
@@ -2160,11 +2182,11 @@ async function autoClickRewards() {
                 text,
                 hasVisual: !!anchor.querySelector("img, mee-icon, svg, .mee-icon, [class*='icon'], [class*='Icon'], picture"),
                 isDisabled: anchor.getAttribute("aria-disabled") === "true" || !!anchor.closest("[aria-disabled='true'], [data-disabled='true']"),
-                isCompleted: false,
+                isCompleted: isCardCompleted(anchor),
                 isVisible: isVisible(anchor),
                 isInNav: !!anchor.closest("nav, header, footer, [role='banner']"),
                 isQuestCard: !!anchor.closest("#quests"),
-                isHeader: anchor.hasAttribute("slot") || anchor.hasAttribute("aria-controls") || anchor.hasAttribute("aria-expanded") || !!anchor.closest("h1, h2, h3, h4") || !!anchor.querySelector("h1, h2, h3, h4"),
+                isHeader: anchor.matches?.("h1, h2, h3, h4, [slot='trigger'], [aria-expanded][aria-controls]") || !!anchor.closest("h1, h2, h3, h4"),
                 isPressable: true,
               };
 
@@ -2249,7 +2271,7 @@ async function autoClickRewards() {
             };
           }
 
-          function dispatchPointerMouseSequence(target) {
+          function dispatchPointerMouseSequence(target, { includeClick = true } = {}) {
             if (!target) return false;
             console.log("[Rewards-Debug] dispatchPointerMouseSequence: Triggering pointer & mouse sequence on target element.");
 
@@ -2276,8 +2298,10 @@ async function autoClickRewards() {
               ["mousedown", MouseEvent, {}],
               ["pointerup", PointerEvent, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0 }],
               ["mouseup", MouseEvent, {}],
-              ["click", MouseEvent, {}],
             ];
+            if (includeClick) {
+              eventPlan.push(["click", MouseEvent, {}]);
+            }
 
             for (const [type, Ctor, extra] of eventPlan) {
               try {
@@ -2320,26 +2344,14 @@ async function autoClickRewards() {
             // but doesn't change the current page's URL or DOM.
             // We must click the actual card element (not window.open) for Bing to register it.
             if (isExternalLink) {
-              // Full pointer+mouse event sequence on the target
+              // Send pointer state once, then use one native click. The previous
+              // pointer click + .click() + Enter sequence opened duplicate tabs.
               try {
-                dispatchPointerMouseSequence(target);
-                await sleep(300);
+                dispatchPointerMouseSequence(target, { includeClick: false });
               } catch { }
 
-              // Native .click()
               try {
                 target.click();
-                await sleep(300);
-              } catch { }
-
-              // Keyboard Enter as fallback
-              try {
-                try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch { } }
-                for (const type of ["keydown", "keypress", "keyup"]) {
-                  target.dispatchEvent(
-                    new KeyboardEvent(type, { key: "Enter", code: "Enter", bubbles: true, cancelable: true, composed: true }),
-                  );
-                }
                 await sleep(300);
               } catch { }
 
@@ -2418,12 +2430,13 @@ async function autoClickRewards() {
             const cardsList = (sectionIds || [])
               .map((sectionId) => collectSectionCardsById(sectionId))
               .flat();
-            if (
-              cardsList.length === 0 &&
-              (sectionIds || []).includes("dailyset") &&
-              /rewards\.bing\.com\/dashboard/i.test(location.href)
-            ) {
-              cardsList.push(...collectDashboardFallbackCards());
+            if (cardsList.length === 0) {
+              const usePageFallback =
+                ((sectionIds || []).includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                ((sectionIds || []).includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href));
+              if (usePageFallback) {
+                cardsList.push(...collectPageRewardFallbackCards());
+              }
             }
             card = cardsList.find((a) => {
               const candKey = buildCardKey(a);
@@ -2476,7 +2489,8 @@ async function autoClickRewards() {
         await chrome.scripting.executeScript({
           target: { tabId },
           world: "MAIN",
-          func: async () => {
+          args: [QUIZ_COMPLETION_RE.source],
+          func: async (quizCompletionPatternSource) => {
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             const normalizeText = (value) =>
               (value || "").replace(/\s+/g, " ").trim();
@@ -2537,9 +2551,29 @@ async function autoClickRewards() {
               );
             };
 
-            const isQuizCompleted = () => {
-              const text = getPageText();
-              return /thanks for playing|come back tomorrow|you earned|quiz complete|all done|nice work|thank you for participating|great job|well done|you got|your score|test complete|cảm ơn bạn|hoàn thành|làm tốt lắm|谢谢|已完成|merci|danke|gracias|спасибо/i.test(text);
+            const getQuizCompletionEvidence = () => {
+              const completionPattern = new RegExp(quizCompletionPatternSource, "i");
+              const completionSelectors =
+                "[role='status'], [aria-live], [class*='BingQA'], [class*='quiz'], [class*='Quiz'], [id*='quiz'], [id*='Quiz'], [class*='poll'], [id*='poll'], cib-serp, cib-shared";
+
+              for (const el of collectAllElements(document)) {
+                if (!(el instanceof HTMLElement) || !isVisible(el)) continue;
+                if (!el.matches?.(completionSelectors) && !el.closest?.(completionSelectors)) continue;
+                const text = normalizeText(
+                  el.innerText || el.textContent || el.getAttribute("aria-label") || "",
+                );
+                if (!text || text.length > 1200) continue;
+                const match = text.match(completionPattern);
+                if (match) {
+                  return {
+                    matched: match[0],
+                    text: text.substring(0, 240),
+                    tag: el.tagName,
+                  };
+                }
+              }
+
+              return null;
             };
 
             const clickElement = (el) => {
@@ -2659,8 +2693,15 @@ async function autoClickRewards() {
             let lastCandidateSnapshot = [];
 
             for (let attempt = 0; attempt < 25; attempt++) {
-              if (isQuizCompleted()) {
-                return { handled: true, completed: true, clicks, reason: "completed" };
+              const completionEvidence = getQuizCompletionEvidence();
+              if (completionEvidence) {
+                return {
+                  handled: true,
+                  completed: true,
+                  clicks,
+                  reason: "completed",
+                  diagnostics: { completionEvidence },
+                };
               }
 
               const candidates = buildCandidates();
@@ -2694,15 +2735,17 @@ async function autoClickRewards() {
               await sleep(2500);
             }
 
+            const completionEvidence = getQuizCompletionEvidence();
             return {
               handled: true,
-              completed: isQuizCompleted(),
+              completed: !!completionEvidence,
               clicks,
-              reason: isQuizCompleted() ? "completed" : "no_progress",
+              reason: completionEvidence ? "completed" : "no_progress",
               diagnostics: {
                 url: location.href,
                 isConversation: /isconversation/i.test(location.href),
                 candidates: lastCandidateSnapshot,
+                completionEvidence,
               },
             };
           },
@@ -3073,7 +3116,7 @@ async function autoClickRewards() {
       const cardAttemptCounts = new Map();
       const discoveredRewardCards = new Map();
       const maxRewardCardClicks = 8;
-      let skipWaitNextRound = false;
+      let headerOnlyRecoveryReloads = 0;
       for (let i = 0; i < maxRewardCardClicks; i++) {
         if (timedOut()) {
           console.warn("[Rewards] Timeout budget reached while clicking reward cards for " + url);
@@ -3081,26 +3124,30 @@ async function autoClickRewards() {
         }
 
         let initialStableEmptySince = null;
-        if (!skipWaitNextRound) {
-          const timeoutMs = /rewards\.bing\.com\/dashboard/i.test(url)
-            ? (discoveredRewardCards.size > 0 ? 15000 : 45000)
-            : 20000;
-          const domReadyResult = await waitForRewardsDomReady(
-            tab.id,
-            targetSectionIds,
-            timeoutMs,
-          );
-          initialStableEmptySince = Number.isFinite(domReadyResult?.stableEmptySince)
-            ? domReadyResult.stableEmptySince
-            : null;
-        }
-        skipWaitNextRound = false;
+        const timeoutMs = /rewards\.bing\.com\/dashboard/i.test(url)
+          ? (discoveredRewardCards.size > 0 ? 15000 : 45000)
+          : 20000;
+        const domReadyResult = await waitForRewardsDomReady(
+          tab.id,
+          targetSectionIds,
+          timeoutMs,
+        );
+        initialStableEmptySince = Number.isFinite(domReadyResult?.stableEmptySince)
+          ? domReadyResult.stableEmptySince
+          : null;
         const rewardCardsResult = await getRewardCards(
           tab.id,
           targetSectionIds,
           initialStableEmptySince,
         );
-        const rewardCards = Array.isArray(rewardCardsResult) ? rewardCardsResult : [];
+        const rewardCards = Array.isArray(rewardCardsResult?.cards)
+          ? rewardCardsResult.cards
+          : Array.isArray(rewardCardsResult)
+            ? rewardCardsResult
+            : [];
+        const scanSections = Array.isArray(rewardCardsResult?.sections)
+          ? rewardCardsResult.sections
+          : [];
         for (const discoveredCard of rewardCards) {
           discoveredRewardCards.set(discoveredCard.key, discoveredCard);
         }
@@ -3110,22 +3157,45 @@ async function autoClickRewards() {
           scan: i + 1,
         });
 
+        const hasHeaderOnlyTargetSection = scanSections.some((section) =>
+          targetSectionIds.includes(section.sectionId) &&
+          section.exists === true &&
+          section.accepted === 0 &&
+          section.directRoundedAnchors === 0 &&
+          Array.isArray(section.rejected) &&
+          section.rejected.some((candidate) => candidate.reasons?.includes("header"))
+        );
+        if (
+          rewardCards.length === 0 &&
+          discoveredRewardCards.size === 0 &&
+          hasHeaderOnlyTargetSection &&
+          headerOnlyRecoveryReloads < 1
+        ) {
+          headerOnlyRecoveryReloads++;
+          await appendDebugLog("warn", "rewards", "Reward section only contained its disclosure header; reloading once", {
+            url,
+            scan: i + 1,
+          });
+          await chrome.tabs.update(tab.id, { url, active: true });
+          await ensureTabLoaded(tab.id, url);
+          await ensureTabFocused(tab.id);
+          await injectDomHelpers(tab.id);
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+
         let card = rewardCards.find((candidate) => !cardAttemptCounts.has(candidate.key));
         if (!card) {
           card = [...discoveredRewardCards.values()].find(
             (candidate) => (cardAttemptCounts.get(candidate.key) || 0) < 1,
           );
           if (card) {
-            skipWaitNextRound = true;
             await appendDebugLog("warn", "rewards", "Using previously discovered reward card after empty re-scan", {
               href: card.href.substring(0, 80),
               queued: discoveredRewardCards.size,
               scan: i + 1,
             });
           }
-        }
-        if (!card) {
-          card = rewardCards.find((candidate) => (cardAttemptCounts.get(candidate.key) || 0) < 2);
         }
         if (!card) {
           console.log("[Rewards] No more actionable reward cards found for " + url);
@@ -3147,6 +3217,7 @@ async function autoClickRewards() {
           : { clicked: !!clickResult, href: "" };
         const wasClicked = structuredClickResult.clicked;
         const resultHref = structuredClickResult.href;
+        let usedManualFallback = false;
 
         await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
@@ -3160,6 +3231,7 @@ async function autoClickRewards() {
             fullHref = "https://rewards.bing.com" + fullHref;
           }
           if (fullHref.startsWith("http")) {
+            usedManualFallback = true;
             await appendDebugLog("warn", "rewards", "Reward card did not open a child tab, falling back to manual open", {
               url: fullHref,
               clicked: wasClicked,
@@ -3209,6 +3281,7 @@ async function autoClickRewards() {
         await appendDebugLog("info", "rewards", `Card ${i + 1} done`, {
           href: card.href.substring(0, 80),
           clicked: wasClicked,
+          manualFallback: usedManualFallback,
           childTabs: newTabIds.length,
           childTabIds: newTabIds,
           closedChildTabIds: cardCleanupResult.closedIds,
@@ -3216,11 +3289,26 @@ async function autoClickRewards() {
           failedChildTabIds: cardCleanupResult.failedIds,
         });
 
-        // Navigate back to the rewards page; the next loop waits for cards before scanning.
-        await chrome.tabs.update(tab.id, { url, active: true });
-        await ensureTabLoaded(tab.id, url);
+        // Reward cards open child tabs. Preserve the hydrated parent DOM so the
+        // remaining cards do not disappear behind another full page reload.
+        let parentStillOnRewardsPage = false;
+        try {
+          const parentTab = await chrome.tabs.get(tab.id);
+          const currentUrl = new URL(parentTab.url || "");
+          const expectedUrl = new URL(url);
+          parentStillOnRewardsPage =
+            currentUrl.origin === expectedUrl.origin &&
+            currentUrl.pathname === expectedUrl.pathname;
+        } catch { }
+        if (!parentStillOnRewardsPage) {
+          await chrome.tabs.update(tab.id, { url, active: true });
+          await ensureTabLoaded(tab.id, url);
+        } else {
+          await chrome.tabs.update(tab.id, { active: true });
+        }
         await ensureTabFocused(tab.id);
-        await injectDomHelpers(tab.id); // Re-inject after navigation
+        await injectDomHelpers(tab.id);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
       }
     } finally {
       chrome.tabs.onCreated.removeListener(onCreated);

@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   EMPTY_REWARD_STABLE_MS,
+  findQuizCompletionPhrase,
+  isActionableRewardCard,
   isDashboardRewardHref,
   shouldFinishEmptyRewardScan,
 } from "../reward-dom-helpers.js";
@@ -11,6 +13,8 @@ test("dashboard reward href filter accepts earning activities", () => {
   const accepted = [
     "https://www.bing.com/search?q=daily+set",
     "https://www.bing.com/spotlight/imagepuzzle?form=ML2BF0",
+    "https://www.bing.com/shop?form=COCBHP&ocid=COCBHP",
+    "https://www.bing.com/?features=vstooltip&publ=RewardsDO",
     "https://rewards.bing.com/dashboard?form=dsetqu",
     "https://rewards.bing.com/activity?rnoreward=1",
     "https://www.bing.com/rewardsquiz_dailyset",
@@ -35,6 +39,29 @@ test("dashboard reward href filter rejects Rewards navigation links", () => {
   for (const href of rejected) {
     assert.equal(isDashboardRewardHref(href), false, href);
   }
+});
+
+test("reward card filter rejects disclosure headers without rejecting heading content", () => {
+  const base = {
+    href: "https://www.bing.com/search?q=daily+activity",
+    text: "Daily activity",
+    hasVisual: true,
+    isDisabled: false,
+    isCompleted: false,
+    isVisible: true,
+    isInNav: false,
+    isQuestCard: false,
+    isPressable: true,
+  };
+
+  assert.equal(isActionableRewardCard({ ...base, isHeader: true }), false);
+  assert.equal(isActionableRewardCard({ ...base, isHeader: false }), true);
+});
+
+test("quiz completion detection requires a strong completion phrase", () => {
+  assert.equal(findQuizCompletionPhrase("Your score may improve if you try again"), "");
+  assert.equal(findQuizCompletionPhrase("You got a new search result"), "");
+  assert.equal(findQuizCompletionPhrase("Great job! You earned 10 points"), "Great job");
 });
 
 test("stable empty scan finishes only after 20 seconds with the target section ready", () => {
