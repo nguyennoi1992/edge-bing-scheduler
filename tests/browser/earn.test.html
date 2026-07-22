@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Earn browser test</title>
+  <style>
+    body { font-family: sans-serif; }
+    .reward-card, .reward-link, button { display: block; width: 280px; min-height: 44px; margin: 8px; }
+    svg { width: 16px; height: 16px; }
+  </style>
+  <script src="../../reward-scanner-helpers.js"></script>
+</head>
+<body>
+  <main id="result" data-status="pending">RUNNING: earn</main>
+
+  <section id="moreactivities" class="rounded-cornerCardDefault activities-grid">
+    <button slot="trigger" aria-expanded="true" aria-controls="earn-cards">Keep earning</button>
+    <div id="earn-cards">
+      <article class="rounded-cornerCardDefault reward-list-item reward-card" data-testid="quote-card">
+        <h3>Quote of the day</h3>
+        <a href="/search?q=quote+of+the+day"><svg aria-hidden="true"></svg>Open activity</a>
+      </article>
+
+      <article class="rounded-cornerCardDefault reward-card" data-testid="rugby-card">
+        <h3>Rugby rules decoded</h3>
+        <a href="https://www.bing.com/search?q=rugby+rules"><svg aria-hidden="true"></svg>Open activity</a>
+      </article>
+
+      <article class="rounded-cornerCardDefault reward-card" data-testid="completed-card">
+        <h3>Completed activity</h3>
+        <a href="/search?q=completed"><svg aria-hidden="true"></svg>Open activity</a>
+        <span class="metadata">Completed</span>
+      </article>
+
+      <a class="reward-link" href="https://rewards.bing.com/earn" data-react-aria-pressable="true">
+        <svg aria-hidden="true"></svg>Browse activities
+      </a>
+    </div>
+  </section>
+
+  <script type="module">
+    import {
+      assert,
+      assertEqual,
+      collectActionableRewardCards,
+      finishBrowserTest,
+    } from "./reward-browser-test-helpers.js";
+
+    finishBrowserTest("earn card scanning", () => {
+      const section = document.getElementById("moreactivities");
+      const { roots, cards } = collectActionableRewardCards(section);
+      const ids = cards.map((card) => card.dataset.testid);
+
+      assertEqual(cards.length, 2, "earn should return only active activity cards");
+      assert(ids.includes("quote-card"), "quote card should be actionable");
+      assert(ids.includes("rugby-card"), "rugby card should be actionable");
+      assert(!roots.includes(section), "the activity collection must not be treated as one card");
+      assert(
+        roots.includes(document.querySelector("[data-testid='quote-card']")),
+        "a card with a list-item class must remain a card root",
+      );
+    });
+  </script>
+</body>
+</html>

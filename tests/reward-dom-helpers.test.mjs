@@ -30,8 +30,12 @@ test("dashboard reward href filter rejects Rewards navigation links", () => {
   const rejected = [
     "",
     "/earn",
+    "/earn/",
+    "/earn?form=nav",
     "/redeem",
     "/redeem/vn?section=shop",
+    "https://rewards.bing.com/earn",
+    "https://rewards.bing.com/earn/",
     "https://rewards.bing.com/redeem",
     "https://rewards.bing.com/redeem/vn?section=shop",
   ];
@@ -56,6 +60,30 @@ test("reward card filter rejects disclosure headers without rejecting heading co
 
   assert.equal(isActionableRewardCard({ ...base, isHeader: true }), false);
   assert.equal(isActionableRewardCard({ ...base, isHeader: false }), true);
+});
+
+test("reward card filter rejects Earn page navigation URLs", () => {
+  const base = {
+    text: "Browse activities",
+    hasVisual: true,
+    isDisabled: false,
+    isCompleted: false,
+    isVisible: true,
+    isInNav: false,
+    isQuestCard: false,
+    isHeader: false,
+    isPressable: true,
+  };
+
+  for (const href of [
+    "/earn",
+    "/earn/",
+    "/earn?form=nav",
+    "https://rewards.bing.com/earn",
+    "https://rewards.bing.com/earn/",
+  ]) {
+    assert.equal(isActionableRewardCard({ ...base, href }), false, href);
+  }
 });
 
 test("quiz completion detection requires a strong completion phrase", () => {

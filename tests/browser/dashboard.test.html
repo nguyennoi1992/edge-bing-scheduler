@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard browser test</title>
+  <style>
+    body { font-family: sans-serif; }
+    .rounded-cornerCardDefault { display: block; width: 280px; min-height: 44px; margin: 8px; }
+    svg { width: 16px; height: 16px; }
+  </style>
+  <script src="../../reward-scanner-helpers.js"></script>
+</head>
+<body>
+  <main id="result" data-status="pending">RUNNING: dashboard</main>
+
+  <section id="dailyset">
+    <a class="rounded-cornerCardDefault" data-react-aria-pressable="true" data-testid="daily-search" href="/search?q=daily+set">
+      <svg aria-hidden="true"></svg>Daily search
+    </a>
+    <a class="rounded-cornerCardDefault" data-react-aria-pressable="true" data-testid="daily-puzzle" href="https://www.bing.com/spotlight/imagepuzzle?form=ML2BF0">
+      <svg aria-hidden="true"></svg>Image puzzle
+    </a>
+    <a class="rounded-cornerCardDefault" data-react-aria-pressable="true" data-testid="daily-completed" href="/search?q=done">
+      <svg aria-hidden="true"></svg><span class="metadata">Completed</span>
+    </a>
+  </section>
+
+  <div id="fallback-links">
+    <a class="rounded-cornerCardDefault" data-react-aria-pressable="true" data-testid="fallback-search" href="https://cn.bing.com/search?q=bonus">
+      <svg aria-hidden="true"></svg>Bonus search
+    </a>
+    <a class="rounded-cornerCardDefault" data-react-aria-pressable="true" data-testid="fallback-redeem" href="https://rewards.bing.com/redeem">
+      <svg aria-hidden="true"></svg>Redeem
+    </a>
+    <a class="rounded-cornerCardDefault" data-react-aria-pressable="true" data-testid="fallback-earn" href="https://rewards.bing.com/earn">
+      <svg aria-hidden="true"></svg>Earn more
+    </a>
+  </div>
+
+  <script type="module">
+    import {
+      assert,
+      assertEqual,
+      collectActionableRewardCards,
+      collectDashboardFallbackCards,
+      finishBrowserTest,
+    } from "./reward-browser-test-helpers.js";
+
+    finishBrowserTest("dashboard card scanning", () => {
+      const daily = collectActionableRewardCards(document.getElementById("dailyset")).cards;
+      const dailyIds = daily.map((card) => card.dataset.testid);
+      const fallback = collectDashboardFallbackCards(document.getElementById("fallback-links"));
+
+      assertEqual(daily.length, 2, "dashboard should skip completed daily-set cards");
+      assert(dailyIds.includes("daily-search"), "daily search should be actionable");
+      assert(dailyIds.includes("daily-puzzle"), "image puzzle should be actionable");
+      assertEqual(fallback.length, 1, "dashboard fallback should reject Rewards navigation links");
+      assertEqual(fallback[0].dataset.testid, "fallback-search", "Bing search should remain actionable");
+    });
+  </script>
+</body>
+</html>

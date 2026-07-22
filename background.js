@@ -339,6 +339,12 @@ async function injectDomHelpers(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
+    files: ["reward-scanner-helpers.js"],
+  });
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
     args: [EMPTY_REWARD_STABLE_MS],
     func: (emptyRewardStableMs) => {
       const helpersReady =
@@ -350,6 +356,7 @@ async function injectDomHelpers(tabId) {
         typeof window.isActionableQuestActivity === "function" &&
         typeof window.buildQuestActivityKey === "function" &&
         typeof window.isDashboardRewardHref === "function" &&
+        typeof window.findRewardCardRoots === "function" &&
         typeof window.shouldFinishEmptyRewardScan === "function";
       if (window.__rewardDomHelpersInjected && helpersReady) return;
       window.__rewardDomHelpersInjected = true;
@@ -368,7 +375,8 @@ async function injectDomHelpers(tabId) {
       window.isDashboardRewardHref = function isDashboardRewardHref(href) {
         const value = href || "";
         return (
-          /^https:\/\/(?:www\.)?bing\.com\//i.test(value) ||
+          /^(?:https?:\/\/(?:[a-z0-9-]+\.)?bing\.com)?\/(?:search|spotlight\/imagepuzzle)\b/i.test(value) ||
+          /^https?:\/\/(?!rewards\b)(?:[a-z0-9-]+\.)?bing\.com\//i.test(value) ||
           /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(value)
         );
       };
@@ -406,7 +414,7 @@ async function injectDomHelpers(tabId) {
         if (!text) return false;
         if (!href && !meta.isPressable) return false;
         if (meta.isHeader) return false;
-        if (href === "/earn") return false;
+        if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) return false;
         // Only skip short navigation buttons like "Earn more" or "See more tasks",
         // NOT cards whose longer description happens to contain these phrases.
         if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
@@ -1576,42 +1584,9 @@ async function autoClickRewards() {
               if (!text) reasons.push("no_text");
               if (!href && !meta.isPressable) reasons.push("no_href_or_pressable");
               if (meta.isHeader) reasons.push("header");
-              if (href === "/earn") reasons.push("earn_link");
+              if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) reasons.push("earn_link");
               if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) reasons.push("nav_button");
               return reasons;
-            }
-
-            function findRewardCardRoots(rootNode) {
-              const selectors = [
-                "a[href]",
-                "button",
-                "[role='button']",
-                "[role='link']",
-                "[data-react-aria-pressable='true']",
-              ];
-              const roots = [];
-              const seen = new Set();
-
-              for (const selector of selectors) {
-                const nodes = rootNode.querySelectorAll(selector);
-                for (const node of nodes) {
-                  const isDirectRewardAction =
-                    node.matches?.("a[href][data-react-aria-pressable='true'], a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']");
-                  const card =
-                    isDirectRewardAction
-                      ? node
-                      :
-                      node.closest("a[href].rounded-cornerCardDefault, button.rounded-cornerCardDefault, [role='button'].rounded-cornerCardDefault, [role='link'].rounded-cornerCardDefault, [data-react-aria-pressable='true'].rounded-cornerCardDefault") ||
-                      node.closest(".rounded-cornerCardDefault") ||
-                      node.closest("[class*='rounded-cornerCardDefault']") ||
-                      node;
-                  if (!card || seen.has(card)) continue;
-                  seen.add(card);
-                  roots.push(card);
-                }
-              }
-
-              return roots;
             }
 
             function collectSectionCardsById(sectionId, debugSections) {
@@ -1638,7 +1613,7 @@ async function autoClickRewards() {
               sectionDebug.directRoundedAnchors = rootNode.querySelectorAll(
                 "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
               ).length;
-              const cardRoots = findRewardCardRoots(rootNode);
+              const cardRoots = window.findRewardCardRoots(rootNode);
               sectionDebug.cardRoots = cardRoots.length;
 
               const unique = [];
@@ -2067,39 +2042,6 @@ async function autoClickRewards() {
             return false;
           }
 
-          function findRewardCardRoots(rootNode) {
-            const selectors = [
-              "a[href]",
-              "button",
-              "[role='button']",
-              "[role='link']",
-              "[data-react-aria-pressable='true']",
-            ];
-            const roots = [];
-            const seen = new Set();
-
-            for (const selector of selectors) {
-              const nodes = rootNode.querySelectorAll(selector);
-              for (const node of nodes) {
-                const isDirectRewardAction =
-                  node.matches?.("a[href][data-react-aria-pressable='true'], a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']");
-                const card =
-                  isDirectRewardAction
-                    ? node
-                    :
-                    node.closest("a[href].rounded-cornerCardDefault, button.rounded-cornerCardDefault, [role='button'].rounded-cornerCardDefault, [role='link'].rounded-cornerCardDefault, [data-react-aria-pressable='true'].rounded-cornerCardDefault") ||
-                    node.closest(".rounded-cornerCardDefault") ||
-                    node.closest("[class*='rounded-cornerCardDefault']") ||
-                    node;
-                if (!card || seen.has(card)) continue;
-                seen.add(card);
-                roots.push(card);
-              }
-            }
-
-            return roots;
-          }
-
           function collectSectionCardsById(sectionId) {
             let section = null;
             if (sectionId !== "global") {
@@ -2108,7 +2050,7 @@ async function autoClickRewards() {
               expandSectionIfCollapsed(section);
             }
             const rootNode = section || document;
-            const cardRoots = findRewardCardRoots(rootNode);
+            const cardRoots = window.findRewardCardRoots(rootNode);
 
             const unique = [];
             const seen = new Set();

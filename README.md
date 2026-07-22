@@ -99,6 +99,24 @@ Open **Options** page:
 
 ---
 
+## Browser Tests
+
+Run the complete Node, syntax, manifest, and Microsoft Edge test suite:
+
+```bash
+tests/run-all-tests.sh
+```
+
+Run only the isolated `earn` and `dashboard` DOM tests in Microsoft Edge:
+
+```bash
+tests/run-browser-tests.sh
+```
+
+The tests use local fixtures and do not click activities on a live Rewards account.
+
+---
+
 ## ⚠️ Notes
 
 * No login credentials are stored or required

@@ -26,7 +26,8 @@ export function findQuizCompletionPhrase(value) {
 export function isDashboardRewardHref(href) {
   const value = href || "";
   return (
-    /^https:\/\/(?:www\.)?bing\.com\//i.test(value) ||
+    /^(?:https?:\/\/(?:[a-z0-9-]+\.)?bing\.com)?\/(?:search|spotlight\/imagepuzzle)\b/i.test(value) ||
+    /^https?:\/\/(?!rewards\b)(?:[a-z0-9-]+\.)?bing\.com\//i.test(value) ||
     /(?:[?&]rnoreward=1\b|rewardsquiz_dailyset|global_dailyset|form=dsetqu|publ=RewardsDO|wqoskey=)/i.test(value)
   );
 }
@@ -59,7 +60,7 @@ export function isActionableRewardCard(meta) {
   if (!meta.hasVisual) return false;
   if (!text) return false;
   if (!href && !meta.isPressable) return false;
-  if (href === "/earn") return false;
+  if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) return false;
   // Only skip short navigation buttons like "Earn more" or "See more tasks",
   // NOT cards whose longer description happens to contain these phrases.
   if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
