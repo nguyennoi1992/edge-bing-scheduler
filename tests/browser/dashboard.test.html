@@ -46,7 +46,7 @@
       finishBrowserTest,
     } from "./reward-browser-test-helpers.js";
 
-    finishBrowserTest("dashboard card scanning", () => {
+    await finishBrowserTest("dashboard card scanning", () => {
       const daily = collectActionableRewardCards(document.getElementById("dailyset")).cards;
       const dailyIds = daily.map((card) => card.dataset.testid);
       const fallback = collectDashboardFallbackCards(document.getElementById("fallback-links"));

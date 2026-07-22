@@ -107,7 +107,7 @@ Run the complete Node, syntax, manifest, and Microsoft Edge test suite:
 tests/run-all-tests.sh
 ```
 
-Run only the isolated `earn` and `dashboard` DOM tests in Microsoft Edge:
+Run only the isolated `earn`, hydration/timeout, and `dashboard` DOM tests in Microsoft Edge:
 
 ```bash
 tests/run-browser-tests.sh

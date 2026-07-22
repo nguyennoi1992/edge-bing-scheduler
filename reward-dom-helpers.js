@@ -6,6 +6,7 @@ const COMPLETED_RE =
   /\bcompleted\b|\bdone\b|hoàn thành|đã xong|已完成|完了|terminé|abgeschlossen|completado|завершено/i;
 
 export const EMPTY_REWARD_STABLE_MS = 20_000;
+export const REWARD_HYDRATION_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000];
 
 export const QUIZ_COMPLETION_RE =
   /thanks for playing|come back tomorrow|you earned(?:\s+\d+)?(?:\s+points?)?|quiz complete|all done|nice work|thank you for participating|great job|well done|test complete|cảm ơn bạn(?: đã tham gia)?|hoàn thành bài|làm tốt lắm|答题完成|已完成测验|quiz terminé|quiz abgeschlossen|cuestionario completado|тест завершен/i;
@@ -56,6 +57,7 @@ export function isActionableRewardCard(meta) {
   if (meta.isCompleted) return false;
   if (meta.isInNav) return false;
   if (meta.isQuestCard) return false;
+  if (meta.isSectionChrome) return false;
   if (meta.isHeader) return false;
   if (!meta.hasVisual) return false;
   if (!text) return false;
@@ -66,6 +68,51 @@ export function isActionableRewardCard(meta) {
   if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
 
   return true;
+}
+
+export function classifyRewardScanState({
+  cardsCount = 0,
+  sections = [],
+  targetSectionIds = [],
+  stableEmpty = false,
+  previouslyHydrated = false,
+} = {}) {
+  const targetIds = new Set(targetSectionIds || []);
+  const targetSections = (sections || []).filter(
+    (section) =>
+      targetIds.size === 0 ||
+      targetIds.has(section.sectionId) ||
+      (section.sectionId === "earn_fallback" && targetIds.has("moreactivities")) ||
+      (section.sectionId === "dashboard_fallback" && targetIds.has("dailyset")),
+  );
+  const existingSections = targetSections.filter((section) => section.exists === true);
+  const hydrated =
+    previouslyHydrated === true ||
+    existingSections.some((section) => section.hydrated === true);
+  const fallbackHydrated = existingSections.some(
+    (section) => /_fallback$/.test(section.sectionId || "") && section.hydrated === true,
+  );
+  const headerOnly = previouslyHydrated !== true && !fallbackHydrated &&
+    existingSections.some(
+      (section) =>
+        section.hydrated !== true &&
+        section.directRoundedAnchors === 0 &&
+        (section.sectionChrome || 0) > 0,
+    );
+
+  if (cardsCount > 0 && hydrated) return "ready_cards";
+  if (headerOnly) return "header_only";
+  if (cardsCount === 0 && stableEmpty && hydrated) return "stable_empty";
+  if (hydrated) return "hydrating";
+  return "partial";
+}
+
+export function getRewardHydrationRetryDelay(attempt) {
+  const index = Math.max(0, Math.min(
+    REWARD_HYDRATION_RETRY_DELAYS_MS.length - 1,
+    Number(attempt || 1) - 1,
+  ));
+  return REWARD_HYDRATION_RETRY_DELAYS_MS[index];
 }
 
 export function buildRewardCardKey({ href = "", title = "", text = "" }) {

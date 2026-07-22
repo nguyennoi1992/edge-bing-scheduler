@@ -1,5 +1,6 @@
 import {
   buildRewardCardKey,
+  classifyRewardScanState,
   isActionableRewardCard,
   isCompletedText,
   isDashboardRewardHref,
@@ -23,7 +24,7 @@ function isCardCompleted(card) {
   return isCompletedText(card.innerText || card.textContent || "");
 }
 
-function getCardMeta(card) {
+function getCardMeta(card, rootNode) {
   const href = card.getAttribute("href") || card.querySelector("a[href]")?.getAttribute("href") || "";
   const text = normalizeRewardText(card.innerText || card.textContent || "");
   return {
@@ -37,6 +38,7 @@ function getCardMeta(card) {
     isVisible: isVisible(card),
     isInNav: !!card.closest("nav, header, footer, [role='banner']"),
     isQuestCard: !!card.closest("#quests"),
+    isSectionChrome: globalThis.isRewardSectionChrome(card, rootNode),
     isHeader:
       card.matches?.("h1, h2, h3, h4, [slot='trigger'], [aria-expanded][aria-controls]") ||
       !!card.closest("h1, h2, h3, h4"),
@@ -52,7 +54,7 @@ export function collectActionableRewardCards(rootNode) {
   const seen = new Set();
 
   for (const card of roots) {
-    const meta = getCardMeta(card);
+    const meta = getCardMeta(card, rootNode);
     if (!isActionableRewardCard(meta)) continue;
     const key = buildRewardCardKey(meta);
     if (seen.has(key)) continue;
@@ -71,8 +73,45 @@ export function collectDashboardFallbackCards(rootNode = document) {
   const uniqueCandidates = [...new Set(candidates)];
   return uniqueCandidates.filter((anchor) => {
     const href = anchor.href || anchor.getAttribute("href") || "";
-    return isDashboardRewardHref(href) && isActionableRewardCard(getCardMeta(anchor));
+    return isDashboardRewardHref(href) && isActionableRewardCard(getCardMeta(anchor, rootNode));
   });
+}
+
+export function getRewardSectionTestState(rootNode) {
+  const { cards } = collectActionableRewardCards(rootNode);
+  const directRoundedAnchors = rootNode.querySelectorAll(
+    "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
+  ).length;
+  const roots = globalThis.findRewardCardRoots(rootNode);
+  const sectionChrome = roots.filter((root) => globalThis.isRewardSectionChrome(root, rootNode)).length;
+  const hydrated = directRoundedAnchors > 0 || cards.length > 0;
+  const sections = [{
+    sectionId: rootNode.id || "moreactivities",
+    exists: true,
+    hydrated,
+    directRoundedAnchors,
+    sectionChrome,
+  }];
+  return {
+    cards,
+    status: classifyRewardScanState({
+      cardsCount: cards.length,
+      sections,
+      targetSectionIds: [rootNode.id || "moreactivities"],
+      stableEmpty: cards.length === 0 && hydrated,
+    }),
+  };
+}
+
+export async function waitForRewardHydration(rootNode, { timeoutMs = 1_000, pollMs = 25 } = {}) {
+  const deadlineAt = Date.now() + timeoutMs;
+  let snapshot = getRewardSectionTestState(rootNode);
+  while (Date.now() < deadlineAt) {
+    if (snapshot.status === "ready_cards" || snapshot.status === "stable_empty") return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    snapshot = getRewardSectionTestState(rootNode);
+  }
+  return { ...snapshot, outcome: "incomplete" };
 }
 
 export function assert(condition, message) {
@@ -85,10 +124,10 @@ export function assertEqual(actual, expected, message) {
   }
 }
 
-export function finishBrowserTest(name, callback) {
+export async function finishBrowserTest(name, callback) {
   const result = document.getElementById("result");
   try {
-    callback();
+    await callback();
     result.dataset.status = "pass";
     result.textContent = `PASS: ${name}`;
     document.title = `PASS: ${name}`;

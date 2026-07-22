@@ -96,6 +96,7 @@ class MockElement {
 }
 
 const findRewardCardRoots = globalThis.findRewardCardRoots;
+const isRewardSectionChrome = globalThis.isRewardSectionChrome;
 
 function isHeader(card) {
   return card.hasAttribute("slot") || card.hasAttribute("aria-controls") || card.hasAttribute("aria-expanded") || !!card.closest("h1, h2, h3, h4") || card.matches?.("h1, h2, h3, h4");
@@ -127,6 +128,34 @@ test("findRewardCardRoots correctly detects multiple separate cards and ignores 
   assert.ok(roots.includes(headerBtn));
   assert.ok(roots.includes(card1));
   assert.ok(roots.includes(card2));
+});
+
+test("rounded disclosure wrappers and progress labels remain section chrome", () => {
+  const section = new MockElement("section");
+  const wrapper = new MockElement("div", { innerText: "Keep earning" }, ["rounded-cornerCardDefault"], section);
+  const trigger = new MockElement(
+    "button",
+    { slot: "trigger", "aria-expanded": "true", "aria-controls": "cards", innerText: "Keep earning" },
+    [],
+    wrapper,
+  );
+  const progressLabels = ["30/50", "45/50", "50/50"];
+  const progressNodes = progressLabels.map((innerText) =>
+    new MockElement(
+      "button",
+      { "data-react-aria-pressable": "true", innerText },
+      [],
+      section,
+    )
+  );
+
+  const roots = findRewardCardRoots(section);
+  assert.ok(roots.includes(trigger));
+  assert.equal(isRewardSectionChrome(trigger, section), true);
+  for (const progress of progressNodes) {
+    assert.ok(roots.includes(progress));
+    assert.equal(isRewardSectionChrome(progress, section), true);
+  }
 });
 
 test("isHeader correctly identifies section headers and accepts cards with headings", () => {

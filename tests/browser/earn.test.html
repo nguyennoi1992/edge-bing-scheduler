@@ -26,6 +26,10 @@
         <a href="https://www.bing.com/search?q=rugby+rules"><svg aria-hidden="true"></svg>Open activity</a>
       </article>
 
+      <button class="rounded-cornerCardDefault reward-card" data-react-aria-pressable="true" data-testid="button-card">
+        <svg aria-hidden="true"></svg>Open bonus activity
+      </button>
+
       <article class="rounded-cornerCardDefault reward-card" data-testid="completed-card">
         <h3>Completed activity</h3>
         <a href="/search?q=completed"><svg aria-hidden="true"></svg>Open activity</a>
@@ -46,14 +50,15 @@
       finishBrowserTest,
     } from "./reward-browser-test-helpers.js";
 
-    finishBrowserTest("earn card scanning", () => {
+    await finishBrowserTest("earn card scanning", () => {
       const section = document.getElementById("moreactivities");
       const { roots, cards } = collectActionableRewardCards(section);
       const ids = cards.map((card) => card.dataset.testid);
 
-      assertEqual(cards.length, 2, "earn should return only active activity cards");
+      assertEqual(cards.length, 3, "earn should return only active activity cards");
       assert(ids.includes("quote-card"), "quote card should be actionable");
       assert(ids.includes("rugby-card"), "rugby card should be actionable");
+      assert(ids.includes("button-card"), "a real activity button without href should be actionable");
       assert(!roots.includes(section), "the activity collection must not be treated as one card");
       assert(
         roots.includes(document.querySelector("[data-testid='quote-card']")),

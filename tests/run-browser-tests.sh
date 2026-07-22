@@ -36,6 +36,7 @@ run_test() {
     --headless=new \
     --disable-gpu \
     --no-sandbox \
+    --virtual-time-budget=2000 \
     --user-data-dir="$profile_dir" \
     --dump-dom "http://127.0.0.1:$port/tests/browser/$name.test.html" \
     >"$output_file" 2>"$browser_log"
@@ -50,4 +51,5 @@ run_test() {
 }
 
 run_test earn
+run_test earn-hydration
 run_test dashboard

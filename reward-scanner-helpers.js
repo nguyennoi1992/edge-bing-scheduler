@@ -7,12 +7,35 @@
     "a[href][data-react-aria-pressable='true'], a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']";
   const CARD_SELECTOR =
     "a[href].rounded-cornerCardDefault, button.rounded-cornerCardDefault, [role='button'].rounded-cornerCardDefault, [role='link'].rounded-cornerCardDefault, [data-react-aria-pressable='true'].rounded-cornerCardDefault, .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']";
+  const DISCLOSURE_SELECTOR =
+    "[slot='trigger'], [aria-expanded][aria-controls]";
+
+  function normalizeText(value) {
+    return (value || "").replace(/\s+/g, " ").trim();
+  }
+
+  global.isRewardSectionChrome = function isRewardSectionChrome(element, rootNode) {
+    if (!element) return false;
+    if (element === rootNode) return true;
+    if (element.matches?.(DISCLOSURE_SELECTOR)) return true;
+    if (element.querySelector?.(DISCLOSURE_SELECTOR)) return true;
+
+    const href =
+      element.getAttribute?.("href") ||
+      element.querySelector?.("a[href]")?.getAttribute?.("href") ||
+      "";
+    if (href) return false;
+
+    const text = normalizeText(element.innerText || element.textContent || "");
+    return /^(?:keep earning|\d+\s*\/\s*\d+(?:\s+tasks?)?)$/i.test(text);
+  };
 
   function isRewardCollectionContainer(element, rootNode) {
     if (!element) return false;
     if (element === rootNode) return true;
     if (element.id === "moreactivities" || element.id === "dailyset") return true;
     if (element.tagName === "SECTION") return true;
+    if (element.querySelector?.(DISCLOSURE_SELECTOR)) return true;
 
     const className = (element.getAttribute?.("class") || element.className || "")
       .toString()

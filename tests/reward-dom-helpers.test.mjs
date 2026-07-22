@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   EMPTY_REWARD_STABLE_MS,
+  classifyRewardScanState,
   findQuizCompletionPhrase,
+  getRewardHydrationRetryDelay,
   isActionableRewardCard,
   isDashboardRewardHref,
   shouldFinishEmptyRewardScan,
@@ -84,6 +86,106 @@ test("reward card filter rejects Earn page navigation URLs", () => {
   ]) {
     assert.equal(isActionableRewardCard({ ...base, href }), false, href);
   }
+});
+
+test("reward card filter rejects section chrome without rejecting real buttons", () => {
+  const base = {
+    href: "",
+    text: "Keep earning",
+    hasVisual: true,
+    isDisabled: false,
+    isCompleted: false,
+    isVisible: true,
+    isInNav: false,
+    isQuestCard: false,
+    isHeader: false,
+    isPressable: true,
+  };
+
+  assert.equal(isActionableRewardCard({ ...base, isSectionChrome: true }), false);
+  assert.equal(
+    isActionableRewardCard({ ...base, text: "Open bonus activity", isSectionChrome: false }),
+    true,
+  );
+});
+
+test("reward scan classification distinguishes header-only and verified empty states", () => {
+  const headerOnlySection = {
+    sectionId: "moreactivities",
+    exists: true,
+    hydrated: false,
+    directRoundedAnchors: 0,
+    sectionChrome: 1,
+  };
+  const hydratedSection = {
+    sectionId: "moreactivities",
+    exists: true,
+    hydrated: true,
+    directRoundedAnchors: 4,
+    sectionChrome: 1,
+  };
+
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 0,
+      sections: [headerOnlySection],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: false,
+    }),
+    "header_only",
+  );
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 0,
+      sections: [hydratedSection],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: true,
+    }),
+    "stable_empty",
+  );
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 0,
+      sections: [headerOnlySection],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: true,
+      previouslyHydrated: true,
+    }),
+    "stable_empty",
+  );
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 0,
+      sections: [hydratedSection, headerOnlySection],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: true,
+    }),
+    "header_only",
+  );
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 1,
+      sections: [{ ...hydratedSection, sectionId: "earn_fallback" }],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: false,
+    }),
+    "ready_cards",
+  );
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 0,
+      sections: [
+        headerOnlySection,
+        { ...hydratedSection, sectionId: "earn_fallback" },
+      ],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: true,
+    }),
+    "stable_empty",
+  );
+  assert.equal(getRewardHydrationRetryDelay(1), 5_000);
+  assert.equal(getRewardHydrationRetryDelay(4), 60_000);
+  assert.equal(getRewardHydrationRetryDelay(9), 60_000);
 });
 
 test("quiz completion detection requires a strong completion phrase", () => {
