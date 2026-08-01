@@ -23,9 +23,19 @@ function formatDayKey(ts) {
 
 function formatMeta(meta) {
   if (!meta || typeof meta !== "object") return "";
+  const formatValue = (value) => {
+    if (value && typeof value === "object") {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  };
   const parts = Object.entries(meta)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => `${key}=${String(value)}`);
+    .map(([key, value]) => `${key}=${formatValue(value)}`);
   return parts.join(" | ");
 }
 
@@ -95,11 +105,39 @@ async function loadLogs() {
   renderLogs(logs);
 }
 
+async function getProfileInfo() {
+  let account = {};
+  try {
+    account = await chrome.identity.getProfileUserInfo();
+  } catch (e) {
+    console.warn("[UI] Failed to read profile account:", e);
+  }
+
+  const manifest = chrome.runtime.getManifest();
+  return {
+    email: account.email || "Not available",
+    accountId: account.id || "Not available",
+    extensionId: chrome.runtime.id,
+    extensionVersion: manifest.version,
+  };
+}
+
+function sanitizeFilenamePart(value) {
+  return String(value || "unknown-profile")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "unknown-profile";
+}
+
 async function exportLogs() {
-  const logs = await getLogs();
+  const [logs, profile] = await Promise.all([getLogs(), getProfileInfo()]);
   const lines = [
     `Bing Scheduler Debug Logs`,
     `Exported: ${formatDate(Date.now())}`,
+    `Profile email: ${profile.email}`,
+    `Profile account ID: ${profile.accountId}`,
+    `Extension ID: ${profile.extensionId}`,
+    `Extension version: ${profile.extensionVersion}`,
     `Retention: last 7 days`,
     `Count: ${logs.length}`,
     "",
@@ -110,7 +148,7 @@ async function exportLogs() {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const a = document.createElement("a");
   a.href = url;
-  a.download = `bing-scheduler-logs-${stamp}.txt`;
+  a.download = `bing-scheduler-logs-${sanitizeFilenamePart(profile.email)}-${stamp}.txt`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -125,8 +163,8 @@ async function openSidebar() {
 
 async function load() {
   const { enabled, time, nextRunAt } = await chrome.storage.sync.get(["enabled", "time", "nextRunAt"]);
-  document.getElementById("enabled").checked = !!enabled;
-  document.getElementById("time").textContent = time || "—";
+  document.getElementById("enabled").checked = enabled !== false;
+  document.getElementById("time").textContent = time || "01:00";
   document.getElementById("next").textContent = nextRunAt ? formatDate(nextRunAt) : "—";
   await loadLogs();
 
@@ -145,14 +183,14 @@ async function load() {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "sync") {
     if (changes.time) {
-      document.getElementById("time").textContent = changes.time.newValue || "—";
+      document.getElementById("time").textContent = changes.time.newValue || "01:00";
     }
     if (changes.nextRunAt) {
       const v = changes.nextRunAt.newValue;
       document.getElementById("next").textContent = v ? formatDate(v) : "—";
     }
     if (changes.enabled) {
-      document.getElementById("enabled").checked = !!changes.enabled.newValue;
+      document.getElementById("enabled").checked = changes.enabled.newValue !== false;
     }
   }
 

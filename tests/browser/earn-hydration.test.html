@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Earn hydration browser test</title>
+  <style>
+    body { font-family: sans-serif; }
+    section, .rounded-cornerCardDefault, button { display: block; width: 280px; min-height: 44px; margin: 8px; }
+    svg { width: 16px; height: 16px; }
+  </style>
+  <script src="../../reward-scanner-helpers.js"></script>
+</head>
+<body>
+  <main id="result" data-status="pending">RUNNING: earn hydration</main>
+
+  <section id="delayed-earn">
+    <div class="rounded-cornerCardDefault">
+      <button slot="trigger" aria-expanded="true" aria-controls="delayed-cards">Keep earning</button>
+    </div>
+    <button data-react-aria-pressable="true">15/20</button>
+    <div id="delayed-cards"></div>
+  </section>
+
+  <section id="stuck-earn">
+    <div class="rounded-cornerCardDefault">
+      <button slot="trigger" aria-expanded="true" aria-controls="stuck-cards">Keep earning</button>
+    </div>
+    <button data-react-aria-pressable="true">15/20</button>
+    <div id="stuck-cards"></div>
+  </section>
+
+  <script type="module">
+    import {
+      assertEqual,
+      finishBrowserTest,
+      getRewardSectionTestState,
+      waitForRewardHydration,
+    } from "./reward-browser-test-helpers.js";
+
+    await finishBrowserTest("earn delayed hydration", async () => {
+      const delayedSection = document.getElementById("delayed-earn");
+      const stuckSection = document.getElementById("stuck-earn");
+
+      const initial = getRewardSectionTestState(delayedSection);
+      assertEqual(initial.cards.length, 0, "section chrome must not be actionable");
+      assertEqual(initial.status, "header_only", "initial section should be header-only");
+
+      setTimeout(() => {
+        document.getElementById("delayed-cards").insertAdjacentHTML(
+          "beforeend",
+          '<a class="rounded-cornerCardDefault" data-react-aria-pressable="true" href="/search?q=quote"><svg></svg>Quote of the day</a>',
+        );
+      }, 100);
+
+      const hydrated = await waitForRewardHydration(delayedSection, { timeoutMs: 1_000 });
+      assertEqual(hydrated.status, "ready_cards", "delayed card should be detected");
+      assertEqual(hydrated.cards.length, 1, "one delayed card should be actionable");
+
+      const timedOut = await waitForRewardHydration(stuckSection, { timeoutMs: 150 });
+      assertEqual(timedOut.status, "header_only", "stuck section should remain header-only");
+      assertEqual(timedOut.outcome, "incomplete", "stuck section must not be completed");
+    });
+  </script>
+</body>
+</html>
