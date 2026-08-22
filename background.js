@@ -464,6 +464,19 @@ async function injectDomHelpers(tabId) {
   });
 }
 
+function getBrowserName() {
+  const ua = globalThis.navigator?.userAgent || "";
+  if (/Edg\//.test(ua)) return "edge";
+  if (/OPR\//.test(ua)) return "opera";
+  if (/Chrome\//.test(ua)) return "chrome";
+  return "unknown";
+}
+
+function isProtectedPageScriptError(error) {
+  const message = String(error?.message || error || "");
+  return /extensions gallery cannot be scripted/i.test(message);
+}
+
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
   await appendDebugLog("info", "rewards", "Rewards phase started");
@@ -3022,7 +3035,24 @@ async function autoClickRewards() {
       await new Promise((r) => setTimeout(r, /rewards\.bing\.com\/dashboard/i.test(url) ? 8000 : 2000));
 
       // Inject helper functions into the page MAIN world so injected scripts can use them
-      await injectDomHelpers(tab.id);
+      try {
+        await injectDomHelpers(tab.id);
+      } catch (e) {
+        if (!isProtectedPageScriptError(e)) throw e;
+        const message =
+          "Browser protects this page from extension scripting; rewards automation skipped";
+        console.warn(`[Rewards] ${message} (${url})`);
+        await appendDebugLog("warn", "rewards", message, {
+          url,
+          browser: getBrowserName(),
+          reason: "page_scripting_blocked",
+        });
+        return {
+          status: "incomplete",
+          reason: "page_scripting_blocked",
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
 
       if (/rewards\.bing\.com\/dashboard/i.test(url)) {
         await appendDebugLog("info", "rewards", "Scanning for ready-to-claim card on dashboard", { url });
@@ -3662,12 +3692,20 @@ async function autoClickRewards() {
         });
       }
     } catch (e) {
+      const pageScriptingBlocked = isProtectedPageScriptError(e);
       console.warn(`[Rewards] Processing failed for ${url}:`, e);
-      await appendDebugLog("error", "rewards", "Reward URL failed", { url, error: String(e) });
+      await appendDebugLog(
+        pageScriptingBlocked ? "warn" : "error",
+        "rewards",
+        pageScriptingBlocked
+          ? "Reward URL skipped: page protected from extension scripting"
+          : "Reward URL failed",
+        { url, browser: getBrowserName(), error: String(e) },
+      );
       rewardOutcomes.push({
         url,
         status: "incomplete",
-        reason: "error",
+        reason: pageScriptingBlocked ? "page_scripting_blocked" : "error",
         error: String(e?.message || e),
       });
     }
