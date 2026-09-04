@@ -8,6 +8,7 @@ import {
   getRewardHydrationRetryDelay,
   isActionableRewardCard,
   isDashboardRewardHref,
+  isRewardsPageUrl,
   shouldFinishEmptyRewardScan,
 } from "../reward-dom-helpers.js";
 
@@ -223,4 +224,38 @@ test("stable empty scan supports an explicit time threshold", () => {
     }),
     true,
   );
+});
+
+test("isRewardsPageUrl accepts valid rewards pages and rejects external/login pages", () => {
+  const validUrls = [
+    "https://rewards.bing.com/earn",
+    "https://rewards.bing.com/earn/",
+    "https://rewards.bing.com/dashboard",
+    "https://rewards.bing.com/dashboard?form=dsetqu",
+    "https://rewards.bing.com/",
+    "https://rewards.bing.com",
+    "https://rewards.bing.com/status",
+  ];
+
+  for (const url of validUrls) {
+    assert.equal(isRewardsPageUrl(url), true, `Expected valid: ${url}`);
+  }
+
+  const invalidUrls = [
+    "https://login.live.com/oauth20_authorize.srf?client_id=123",
+    "https://account.microsoft.com/",
+    "https://www.bing.com/",
+    "https://www.bing.com/search?q=test",
+    "http://rewards.bing.com/dashboard",
+    "edge://extensions",
+    "chrome-extension://nfhfoeifnelcgcalhnbidjdmgohcfbon/popup.html",
+    "",
+    null,
+    undefined,
+    "not-a-valid-url",
+  ];
+
+  for (const url of invalidUrls) {
+    assert.equal(isRewardsPageUrl(url), false, `Expected invalid: ${url}`);
+  }
 });
