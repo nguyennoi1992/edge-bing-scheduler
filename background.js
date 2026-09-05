@@ -659,8 +659,42 @@ async function autoClickRewards() {
               return (el.getAttribute("role") || "").toLowerCase() === "dialog";
             });
 
+            const CLAIM_TEXT_RE =
+              /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^готово к получению$|^получить баллы$/i;
+            const CLAIM_MATCH_RE =
+              /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
+
             for (const dialog of dialogs) {
-              if (!/claim points/i.test(getNodeText(dialog))) continue;
+              if (!CLAIM_MATCH_RE.test(getNodeText(dialog))) continue;
+
+              // 1. Search for an element with text matching "Claim points" inside a button
+              const labelEl = Array.from(dialog.querySelectorAll("*")).find((el) => {
+                if (!(el instanceof HTMLElement)) return false;
+                if (!isVisible(el)) return false;
+                if (!CLAIM_TEXT_RE.test(getNodeText(el))) return false;
+                return Boolean(
+                  el.closest(
+                    "button, [role='button'], input[type='button'], input[type='submit']",
+                  ),
+                );
+              });
+
+              if (labelEl) {
+                const btn = labelEl.closest(
+                  "button, [role='button'], input[type='button'], input[type='submit']",
+                );
+                if (
+                  btn &&
+                  isVisible(btn) &&
+                  !btn.disabled &&
+                  btn.getAttribute("aria-disabled") !== "true"
+                ) {
+                  return btn;
+                }
+              }
+
+              // 2. Fallback: search for buttons whose text contains "claim points"
+              // (e.g. "103 Pending Claim points"), excluding dismiss/close controls
               const button = Array.from(
                 dialog.querySelectorAll(
                   "button, [role='button'], input[type='button'], input[type='submit']",
@@ -668,7 +702,12 @@ async function autoClickRewards() {
               ).find((el) => {
                 if (!(el instanceof HTMLElement)) return false;
                 if (!isVisible(el)) return false;
-                return getNodeText(el).toLowerCase() === "claim points";
+                if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+                const text = getNodeText(el);
+                if (/^(close|dismiss|how it works|đóng|bỏ qua)$/i.test(text)) return false;
+                const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
+                if (/close|dismiss/i.test(ariaLabel)) return false;
+                return CLAIM_MATCH_RE.test(text);
               });
               if (button) return button;
             }
@@ -3144,7 +3183,11 @@ async function autoClickRewards() {
           console.log(
             `[Rewards] No ready points claimed on dashboard (${claimResult.reason || "not_available"})`,
           );
-          await appendDebugLog("info", "rewards", "No ready-to-claim card found", {
+          const message =
+            claimResult.reason === "not_ready"
+              ? "No ready-to-claim card found"
+              : `Ready-to-claim card not claimed (${claimResult.reason || "not_available"})`;
+          await appendDebugLog("info", "rewards", message, {
             url,
             reason: claimResult.reason || "not_available",
           });
