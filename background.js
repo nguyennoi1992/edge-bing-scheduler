@@ -12,6 +12,7 @@ import {
   isActionableRewardCard,
   isCompletedText,
   isDashboardRewardHref,
+  isRewardsPageUrl,
   normalizeRewardText,
   shouldFinishEmptyRewardScan,
 } from "./reward-dom-helpers.js";
@@ -327,6 +328,59 @@ function getQueryList(cfg) {
 }
 
 // ---------------- Bing Rewards auto click ----------------
+function getBrowserName() {
+  const ua = globalThis.navigator?.userAgent || "";
+  if (/Edg\//.test(ua)) return "edge";
+  if (/OPR\//.test(ua)) return "opera";
+  if (/Chrome\//.test(ua)) return "chrome";
+  return "unknown";
+}
+
+function isProtectedPageScriptError(error) {
+  const message = String(error?.message || error?.originalError?.message || error || "");
+  return (
+    error?.code === "PAGE_SCRIPTING_BLOCKED" ||
+    /extensions gallery cannot be scripted/i.test(message)
+  );
+}
+
+async function assertScriptableRewardsTab(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const url = tab.url || tab.pendingUrl || "";
+
+  if (!isRewardsPageUrl(url)) {
+    const error = new Error(
+      `Rewards tab is not scriptable: ${url || "(empty URL)"}`
+    );
+    error.code = "REWARDS_TAB_NOT_SCRIPTABLE";
+    error.tabUrl = url;
+    throw error;
+  }
+
+  return tab;
+}
+
+async function executeRewardsScript(tabId, scriptOptions) {
+  await assertScriptableRewardsTab(tabId);
+  try {
+    return await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      ...scriptOptions,
+    });
+  } catch (e) {
+    if (isProtectedPageScriptError(e)) {
+      const protectedError = new Error(
+        `Browser protects this page from extension scripting: ${e?.message || e}`
+      );
+      protectedError.code = "PAGE_SCRIPTING_BLOCKED";
+      protectedError.originalError = e;
+      throw protectedError;
+    }
+    throw e;
+  }
+}
+
 /**
  * Inject the reward-dom-helpers functions into the page's MAIN world as globals.
  * This MUST be called before any executeScript({world:"MAIN"}) that references
@@ -338,15 +392,11 @@ function getQueryList(cfg) {
  * making "Run now" appear to do nothing.
  */
 async function injectDomHelpers(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
+  await executeRewardsScript(tabId, {
     files: ["reward-scanner-helpers.js"],
   });
 
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
+  await executeRewardsScript(tabId, {
     args: [EMPTY_REWARD_STABLE_MS],
     func: (emptyRewardStableMs) => {
       const helpersReady =
@@ -474,11 +524,10 @@ async function autoClickRewards() {
   ];
 
   async function claimReadyPoints(tabId) {
-    const scriptResults =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: async () => {
+    try {
+      const scriptResults =
+        await executeRewardsScript(tabId, {
+          func: async () => {
           const maxAttempts = 20;
           const pollMs = 800;
 
@@ -610,8 +659,42 @@ async function autoClickRewards() {
               return (el.getAttribute("role") || "").toLowerCase() === "dialog";
             });
 
+            const CLAIM_TEXT_RE =
+              /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^готово к получению$|^получить баллы$/i;
+            const CLAIM_MATCH_RE =
+              /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
+
             for (const dialog of dialogs) {
-              if (!/claim points/i.test(getNodeText(dialog))) continue;
+              if (!CLAIM_MATCH_RE.test(getNodeText(dialog))) continue;
+
+              // 1. Search for an element with text matching "Claim points" inside a button
+              const labelEl = Array.from(dialog.querySelectorAll("*")).find((el) => {
+                if (!(el instanceof HTMLElement)) return false;
+                if (!isVisible(el)) return false;
+                if (!CLAIM_TEXT_RE.test(getNodeText(el))) return false;
+                return Boolean(
+                  el.closest(
+                    "button, [role='button'], input[type='button'], input[type='submit']",
+                  ),
+                );
+              });
+
+              if (labelEl) {
+                const btn = labelEl.closest(
+                  "button, [role='button'], input[type='button'], input[type='submit']",
+                );
+                if (
+                  btn &&
+                  isVisible(btn) &&
+                  !btn.disabled &&
+                  btn.getAttribute("aria-disabled") !== "true"
+                ) {
+                  return btn;
+                }
+              }
+
+              // 2. Fallback: search for buttons whose text contains "claim points"
+              // (e.g. "103 Pending Claim points"), excluding dismiss/close controls
               const button = Array.from(
                 dialog.querySelectorAll(
                   "button, [role='button'], input[type='button'], input[type='submit']",
@@ -619,7 +702,12 @@ async function autoClickRewards() {
               ).find((el) => {
                 if (!(el instanceof HTMLElement)) return false;
                 if (!isVisible(el)) return false;
-                return getNodeText(el).toLowerCase() === "claim points";
+                if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+                const text = getNodeText(el);
+                if (/^(close|dismiss|how it works|đóng|bỏ qua)$/i.test(text)) return false;
+                const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
+                if (/close|dismiss/i.test(ariaLabel)) return false;
+                return CLAIM_MATCH_RE.test(text);
               });
               if (button) return button;
             }
@@ -663,7 +751,21 @@ async function autoClickRewards() {
       claimedPoints: 0,
       reason: "missing_result",
     });
+  } catch (e) {
+    const isBlocked = isProtectedPageScriptError(e) || e?.code === "PAGE_SCRIPTING_BLOCKED";
+    const notScriptable = e?.code === "REWARDS_TAB_NOT_SCRIPTABLE";
+    console.warn("[Rewards] claimReadyPoints skipped or failed:", e?.message || e);
+    return {
+      clicked: false,
+      claimedPoints: 0,
+      reason: isBlocked
+        ? "page_scripting_blocked"
+        : notScriptable
+          ? "tab_not_scriptable"
+          : (e?.message || "script_failed"),
+    };
   }
+}
 
   async function closeChildTabs(parentTabId, rounds = 4, delayMs = 1200, windowId = undefined) {
     for (let i = 0; i < rounds; i++) {
@@ -1094,9 +1196,7 @@ async function autoClickRewards() {
   async function getQuestCards(tabId) {
     await injectDomHelpers(tabId);
     const [{ result: questCards = [] } = {}] =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
+      await executeRewardsScript(tabId, {
         func: () => {
           const isVisible = (el) => {
             if (!el || typeof el.getBoundingClientRect !== "function") {
@@ -1157,9 +1257,7 @@ async function autoClickRewards() {
   async function clickQuestCard(tabId, targetHref) {
     await injectDomHelpers(tabId);
     const [{ result: clicked = false }] =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
+      await executeRewardsScript(tabId, {
         args: [targetHref],
         func: async (hrefToClick) => {
           console.log("[Rewards-Debug] clickQuestCard: Attempting to find and click quest card:", hrefToClick);
@@ -1231,9 +1329,7 @@ async function autoClickRewards() {
   async function getQuestActivities(tabId) {
     await injectDomHelpers(tabId);
     const [{ result: activities = [] } = {}] =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
+      await executeRewardsScript(tabId, {
         func: () => {
           const isVisible = (el) => {
             if (!el || typeof el.getBoundingClientRect !== "function") {
@@ -1326,9 +1422,7 @@ async function autoClickRewards() {
   async function clickQuestActivity(tabId, targetKey) {
     await injectDomHelpers(tabId);
     const [{ result: clicked = false }] =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
+      await executeRewardsScript(tabId, {
         args: [targetKey],
         func: async (keyToClick) => {
           console.log("[Rewards-Debug] clickQuestActivity: Attempting to click activity with key:", keyToClick);
@@ -1578,9 +1672,7 @@ async function autoClickRewards() {
     await injectDomHelpers(tabId);
     const scanTimeoutMs = Math.max(1000, Math.min(40000, maxScanMs));
     let scanTimeoutId;
-    const scanExecution = chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
+    const scanExecution = executeRewardsScript(tabId, {
       args: [
         targetSectionIds || rewardSectionIds,
         initialStableEmptySince,
@@ -2103,9 +2195,7 @@ async function autoClickRewards() {
   async function clickRewardCard(tabId, targetKey, targetSectionIds) {
     await injectDomHelpers(tabId);
     const scriptResults =
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
+      await executeRewardsScript(tabId, {
         args: [targetKey, targetSectionIds || rewardSectionIds],
         func: async (keyToClick, sectionIds) => {
           console.log("[Rewards-Debug] clickRewardCard: Attempting to click reward card with key:", keyToClick);
@@ -3021,8 +3111,46 @@ async function autoClickRewards() {
       await ensureTabFocused(tab.id);
       await new Promise((r) => setTimeout(r, /rewards\.bing\.com\/dashboard/i.test(url) ? 8000 : 2000));
 
+      // Validate tab is on rewards page before injection
+      const currentTab = await chrome.tabs.get(tab.id);
+      if (!isRewardsPageUrl(currentTab.url || currentTab.pendingUrl)) {
+        const message = "Rewards tab redirected to non-rewards URL; rewards automation skipped";
+        console.warn(`[Rewards] ${message} (${currentTab.url})`);
+        await appendDebugLog("warn", "rewards", message, {
+          url,
+          actualUrl: currentTab.url,
+          reason: "unexpected_redirect",
+        });
+        return {
+          status: "incomplete",
+          reason: "unexpected_redirect",
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+
       // Inject helper functions into the page MAIN world so injected scripts can use them
-      await injectDomHelpers(tab.id);
+      try {
+        await injectDomHelpers(tab.id);
+      } catch (e) {
+        const isBlocked = isProtectedPageScriptError(e) || e?.code === "PAGE_SCRIPTING_BLOCKED";
+        const notScriptable = e?.code === "REWARDS_TAB_NOT_SCRIPTABLE";
+        if (!isBlocked && !notScriptable) throw e;
+        const reason = isBlocked ? "page_scripting_blocked" : "unexpected_redirect";
+        const message = isBlocked
+          ? "Browser protects this page from extension scripting; rewards automation skipped"
+          : `Rewards tab is not scriptable; rewards automation skipped (${e?.message || e})`;
+        console.warn(`[Rewards] ${message} (${url})`);
+        await appendDebugLog("warn", "rewards", message, {
+          url,
+          browser: getBrowserName(),
+          reason,
+        });
+        return {
+          status: "incomplete",
+          reason,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
 
       if (/rewards\.bing\.com\/dashboard/i.test(url)) {
         await appendDebugLog("info", "rewards", "Scanning for ready-to-claim card on dashboard", { url });
@@ -3038,13 +3166,28 @@ async function autoClickRewards() {
           await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
           await chrome.tabs.reload(tab.id);
           await ensureTabLoaded(tab.id, url);
+
+          const currentTabAfterReload = await chrome.tabs.get(tab.id);
+          console.log("[Rewards] After reload:", currentTabAfterReload.url);
+          if (!isRewardsPageUrl(currentTabAfterReload.url || currentTabAfterReload.pendingUrl)) {
+            console.warn(
+              "[Rewards] Skip injection because page redirected:",
+              currentTabAfterReload.url
+            );
+            return makeIncompleteOutcome("unexpected_redirect");
+          }
+
           await injectDomHelpers(tab.id); // Re-inject after reload
           await new Promise((r) => setTimeout(r, 2000));
         } else {
           console.log(
             `[Rewards] No ready points claimed on dashboard (${claimResult.reason || "not_available"})`,
           );
-          await appendDebugLog("info", "rewards", "No ready-to-claim card found", {
+          const message =
+            claimResult.reason === "not_ready"
+              ? "No ready-to-claim card found"
+              : `Ready-to-claim card not claimed (${claimResult.reason || "not_available"})`;
+          await appendDebugLog("info", "rewards", message, {
             url,
             reason: claimResult.reason || "not_available",
           });
@@ -3188,6 +3331,17 @@ async function autoClickRewards() {
           await chrome.tabs.update(tab.id, { url, active: true });
           await ensureTabLoaded(tab.id, url);
           await ensureTabFocused(tab.id);
+
+          const currentTabAfterQuest = await chrome.tabs.get(tab.id);
+          console.log("[Rewards] After quest navigation:", currentTabAfterQuest.url);
+          if (!isRewardsPageUrl(currentTabAfterQuest.url || currentTabAfterQuest.pendingUrl)) {
+            console.warn(
+              "[Rewards] Skip injection because page redirected:",
+              currentTabAfterQuest.url
+            );
+            return makeIncompleteOutcome("unexpected_redirect");
+          }
+
           await injectDomHelpers(tab.id); // Re-inject after navigation
           await new Promise((r) => setTimeout(r, 2000));
         }
@@ -3387,6 +3541,17 @@ async function autoClickRewards() {
               timeoutMs: Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
             });
             await ensureTabFocused(tab.id);
+
+            const currentTabAfterHydration = await chrome.tabs.get(tab.id);
+            console.log("[Rewards] After hydration reload:", currentTabAfterHydration.url);
+            if (!isRewardsPageUrl(currentTabAfterHydration.url || currentTabAfterHydration.pendingUrl)) {
+              console.warn(
+                "[Rewards] Skip injection because page redirected:",
+                currentTabAfterHydration.url
+              );
+              return makeIncompleteOutcome("unexpected_redirect");
+            }
+
             await injectDomHelpers(tab.id);
           } catch (e) {
             await appendDebugLog("warn", "rewards", "Reward hydration reload failed", {
@@ -3579,11 +3744,7 @@ async function autoClickRewards() {
         let parentStillOnRewardsPage = false;
         try {
           const parentTab = await chrome.tabs.get(tab.id);
-          const currentUrl = new URL(parentTab.url || "");
-          const expectedUrl = new URL(url);
-          parentStillOnRewardsPage =
-            currentUrl.origin === expectedUrl.origin &&
-            currentUrl.pathname === expectedUrl.pathname;
+          parentStillOnRewardsPage = isRewardsPageUrl(parentTab.url || parentTab.pendingUrl);
         } catch { }
         if (!parentStillOnRewardsPage) {
           currentDocumentHydrated = false;
@@ -3596,6 +3757,16 @@ async function autoClickRewards() {
           await chrome.tabs.update(tab.id, { active: true });
         }
         await ensureTabFocused(tab.id);
+
+        const currentTabAfterLoop = await chrome.tabs.get(tab.id);
+        if (!isRewardsPageUrl(currentTabAfterLoop.url || currentTabAfterLoop.pendingUrl)) {
+          console.warn(
+            "[Rewards] Skip injection because page redirected:",
+            currentTabAfterLoop.url
+          );
+          return makeIncompleteOutcome("unexpected_redirect");
+        }
+
         await injectDomHelpers(tab.id);
         await sleepWithinDeadline(1500);
       }
@@ -3662,12 +3833,27 @@ async function autoClickRewards() {
         });
       }
     } catch (e) {
+      const pageScriptingBlocked = isProtectedPageScriptError(e);
+      const tabNotScriptable = e?.code === "REWARDS_TAB_NOT_SCRIPTABLE";
       console.warn(`[Rewards] Processing failed for ${url}:`, e);
-      await appendDebugLog("error", "rewards", "Reward URL failed", { url, error: String(e) });
+      await appendDebugLog(
+        pageScriptingBlocked || tabNotScriptable ? "warn" : "error",
+        "rewards",
+        pageScriptingBlocked
+          ? "Reward URL skipped: page protected from extension scripting"
+          : tabNotScriptable
+            ? "Reward URL skipped: tab redirected to non-rewards URL"
+            : "Reward URL failed",
+        { url, browser: getBrowserName(), error: String(e) },
+      );
       rewardOutcomes.push({
         url,
         status: "incomplete",
-        reason: "error",
+        reason: pageScriptingBlocked
+          ? "page_scripting_blocked"
+          : tabNotScriptable
+            ? "unexpected_redirect"
+            : "error",
         error: String(e?.message || e),
       });
     }

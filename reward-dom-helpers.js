@@ -147,3 +147,19 @@ export function buildQuestActivityKey({ href = "", innerLabel = "", ariaLabel = 
   const label = normalizeRewardText(ariaLabel) || normalizeRewardText(innerLabel);
   return `${href}|${label.toLowerCase()}`;
 }
+
+export function isRewardsPageUrl(url) {
+  try {
+    const u = new URL(url || "");
+    return (
+      u.protocol === "https:" &&
+      u.hostname === "rewards.bing.com" &&
+      (u.pathname === "/earn" ||
+        u.pathname === "/dashboard" ||
+        u.pathname === "/" ||
+        u.pathname.startsWith("/"))
+    );
+  } catch {
+    return false;
+  }
+}
