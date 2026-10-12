@@ -184,6 +184,38 @@ test("reward scan classification distinguishes header-only and verified empty st
     }),
     "stable_empty",
   );
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 0,
+      sections: [{
+        sectionId: "moreactivities",
+        exists: true,
+        hydrated: false,
+        directRoundedAnchors: 0,
+        completed: 1,
+        sectionChrome: 1,
+      }],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: false,
+    }),
+    "partial",
+  );
+  assert.equal(
+    classifyRewardScanState({
+      cardsCount: 0,
+      sections: [{
+        sectionId: "moreactivities",
+        exists: true,
+        hydrated: true,
+        directRoundedAnchors: 0,
+        completed: 1,
+        sectionChrome: 1,
+      }],
+      targetSectionIds: ["moreactivities"],
+      stableEmpty: true,
+    }),
+    "stable_empty",
+  );
   assert.equal(getRewardHydrationRetryDelay(1), 5_000);
   assert.equal(getRewardHydrationRetryDelay(4), 60_000);
   assert.equal(getRewardHydrationRetryDelay(9), 60_000);

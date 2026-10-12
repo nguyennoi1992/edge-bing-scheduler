@@ -97,6 +97,7 @@ export function classifyRewardScanState({
       (section) =>
         section.hydrated !== true &&
         section.directRoundedAnchors === 0 &&
+        (section.completed || 0) === 0 &&
         (section.sectionChrome || 0) > 0,
     );
 

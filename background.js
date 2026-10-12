@@ -22,7 +22,7 @@ const ALARM_NAME = "bingScheduler";
 const BADGE_ALARM = "badgeTick";
 const REWARDS_SETTLE_MS = 8000;
 const REWARD_CHILD_SYNC_MS = 5000;
-const REWARD_URL_TIMEOUT_MS = 480000;
+const REWARD_URL_TIMEOUT_MS = 240000;
 const DEBUG_LOGS_KEY = 'debugLogs';
 const DEBUG_LOG_RETENTION_DAYS = 7;
 const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -1078,21 +1078,25 @@ async function autoClickRewards() {
                 .length;
             };
 
-            const countFallbackCards = () =>
-              Array.from(
+            const countFallbackCards = () => {
+              expandSectionIfCollapsed(document);
+              return Array.from(
                 document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
               )
                 .filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""))
                 .filter((anchor) => isPendingCard(anchor, document))
                 .length;
+            };
 
-            const countFallbackCardShells = () =>
-              Array.from(
+            const countFallbackCardShells = () => {
+              expandSectionIfCollapsed(document);
+              return Array.from(
                 document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
               )
                 .filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""))
                 .filter((anchor) => isRewardCardShell(anchor, document))
                 .length;
+            };
 
             while (Date.now() - startedAt < maxWaitMs) {
               attempts++;
@@ -1120,7 +1124,13 @@ async function autoClickRewards() {
                   : 0;
               const count = Math.max(sectionCards, fallbackCards);
               const hydratedCards = Math.max(sectionCardShells, fallbackCardShells);
-              const hydrated = hydratedCards > 0 || allowPreviouslyHydratedEmpty === true;
+              const directRoundedAnchors = document.querySelectorAll(
+                "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
+              ).length;
+              const hydrated =
+                hydratedCards > 0 ||
+                directRoundedAnchors > 0 ||
+                allowPreviouslyHydratedEmpty === true;
               const hasTargetSection = sections.length > 0;
 
               const now = Date.now();
@@ -1909,11 +1919,15 @@ async function autoClickRewards() {
               console.log(
                 `[Rewards] Section #${sectionId}: found ${unique.length} actionable card(s)`,
               );
-              sectionDebug.hydrated = sectionDebug.cardShells > 0;
+              sectionDebug.hydrated =
+                sectionDebug.cardShells > 0 ||
+                sectionDebug.completed > 0 ||
+                sectionDebug.directRoundedAnchors > 0;
               return unique;
             }
 
             function collectPageRewardFallbackCards(debugSections, sectionId) {
+              expandSectionIfCollapsed(document);
               const sectionDebug = {
                 sectionId,
                 exists: true,
@@ -1998,7 +2012,10 @@ async function autoClickRewards() {
                 sectionDebug.accepted++;
               }
 
-              sectionDebug.hydrated = sectionDebug.cardShells > 0;
+              sectionDebug.hydrated =
+                sectionDebug.cardShells > 0 ||
+                sectionDebug.completed > 0 ||
+                sectionDebug.directRoundedAnchors > 0;
               return unique;
             }
 
@@ -2170,9 +2187,22 @@ async function autoClickRewards() {
       stableEmpty: scanResult?.reason === "stable_empty",
       previouslyHydrated,
     });
+    const compactSections = debug.map((s) => ({
+      sectionId: s.sectionId,
+      exists: s.exists,
+      hydrated: s.hydrated,
+      cardRoots: s.cardRoots,
+      accepted: s.accepted,
+      completed: s.completed,
+      directRoundedAnchors: s.directRoundedAnchors,
+      sectionChrome: s.sectionChrome,
+      cardShells: s.cardShells,
+      rejectionReasons: [...new Set((s.rejected || []).flatMap((r) => (typeof r === "object" && r ? r.reasons || [] : [r])))],
+      filteredOutCount: (s.filteredOut || []).length,
+    }));
     await appendDebugLog("info", "rewards", "Reward card scan diagnostics", {
       tabId,
-      sections: debug,
+      sections: compactSections,
       attempts: scanResult?.attempts,
       reason: scanResult?.reason,
       stableEmptyMs: scanResult?.stableEmptyMs,
@@ -2326,6 +2356,7 @@ async function autoClickRewards() {
           }
 
           function collectPageRewardFallbackCards() {
+            expandSectionIfCollapsed(document);
             const anchors = [...new Set([
               ...document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
               ...document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
@@ -3458,6 +3489,9 @@ async function autoClickRewards() {
         if (rewardCards.length > 0 || rewardCardsResult?.hydrated === true) {
           currentDocumentHydrated = true;
         }
+        if (rewardCards.length > 0) {
+          consecutiveHydrationRetries = 0;
+        }
 
         await appendDebugLog("info", "rewards", `Found ${rewardCards.length} reward card(s) to click`, {
           url,
@@ -3509,6 +3543,32 @@ async function autoClickRewards() {
         }
 
         if (rewardCards.length === 0) {
+          const allRelevantHydrated =
+            scanSections.length > 0 &&
+            scanSections
+              .filter(isRelevantScanSection)
+              .every((s) => !s.exists || s.hydrated === true);
+          if (
+            lastScanSummary &&
+            allRelevantHydrated &&
+            lastHydrationStatus !== "partial" &&
+            lastHydrationStatus !== "header_only" &&
+            lastScanSummary.hydratedSectionCount > 0 &&
+            lastScanSummary.completedCount > 0 &&
+            lastScanSummary.acceptedCount === 0
+          ) {
+            return {
+              status: "completed",
+              reason: "stable_empty",
+              elapsedMs: Date.now() - startedAt,
+              clickCount,
+              scanCount,
+              hydrationRetryCount,
+              hydrationStatus: "stable_empty",
+              scan: lastScanSummary,
+            };
+          }
+
           hydrationRetryCount++;
           consecutiveHydrationRetries++;
           const retryDelayMs = getRewardHydrationRetryDelay(consecutiveHydrationRetries);
@@ -3529,7 +3589,7 @@ async function autoClickRewards() {
             sectionIds: lastScanSummary.sectionIds,
           });
 
-          if (!(await sleepWithinDeadline(retryDelayMs))) {
+          if (consecutiveHydrationRetries > 3 || !(await sleepWithinDeadline(retryDelayMs))) {
             return makeIncompleteOutcome("hydration_timeout");
           }
 
@@ -3788,7 +3848,12 @@ async function autoClickRewards() {
           ...finalCleanupResult.closedIds,
           ...finalCleanupResult.missingIds,
         ]);
-        await closeChildTabs(tab.id, 4, 1200, windowId);
+        const needsPolling = spawnedTabIds.size > 0 || clickCount > 0;
+        if (needsPolling) {
+          await closeChildTabs(tab.id, 4, 1200, windowId);
+        } else {
+          await closeChildTabs(tab.id, 1, 0, windowId);
+        }
         try {
           await chrome.tabs.remove(tab.id);
           console.log(`[Rewards] Closed tab for ${url}`);
@@ -4360,27 +4425,40 @@ async function runTask() {
     });
 
     // 3. Final sweep for rewards (second pass)
-    console.log("⚡ Running second pass for Bing Rewards auto click...");
-    await appendDebugLog("info", "rewards", "Second Rewards phase started");
-    try {
-      await ensureInternetOrThrow("rewards_second_pass_before");
-      const secondRewardOutcomes = await autoClickRewards();
-      await ensureInternetOrThrow("rewards_second_pass_after");
-      const secondIncompleteRewards = secondRewardOutcomes.filter(
-        (outcome) => outcome.status !== "completed",
-      );
+    const firstPassAllBlocked =
+      firstRewardOutcomes.length > 0 &&
+      firstRewardOutcomes.every((outcome) => outcome.reason === "page_scripting_blocked");
+
+    if (firstPassAllBlocked) {
+      console.log("[Rewards] Skipping second rewards phase: page scripting blocked by browser policy on all rewards URLs");
       await appendDebugLog(
-        secondIncompleteRewards.length ? "warn" : "success",
+        "info",
         "rewards",
-        secondIncompleteRewards.length
-          ? "Second Rewards phase completed with incomplete URL(s)"
-          : "Second Rewards phase completed",
-        { outcomes: secondRewardOutcomes },
+        "Skipping second rewards phase: page scripting blocked on all rewards URLs by browser policy",
       );
-    } catch (e) {
-      if (isInternetUnavailableError(e)) throw e;
-      console.warn("[Rewards] Second pass failed:", e);
-      await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
+    } else {
+      console.log("⚡ Running second pass for Bing Rewards auto click...");
+      await appendDebugLog("info", "rewards", "Second Rewards phase started");
+      try {
+        await ensureInternetOrThrow("rewards_second_pass_before");
+        const secondRewardOutcomes = await autoClickRewards();
+        await ensureInternetOrThrow("rewards_second_pass_after");
+        const secondIncompleteRewards = secondRewardOutcomes.filter(
+          (outcome) => outcome.status !== "completed",
+        );
+        await appendDebugLog(
+          secondIncompleteRewards.length ? "warn" : "success",
+          "rewards",
+          secondIncompleteRewards.length
+            ? "Second Rewards phase completed with incomplete URL(s)"
+            : "Second Rewards phase completed",
+          { outcomes: secondRewardOutcomes },
+        );
+      } catch (e) {
+        if (isInternetUnavailableError(e)) throw e;
+        console.warn("[Rewards] Second pass failed:", e);
+        await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
+      }
     }
 
     await markRunCompletedToday();
@@ -4446,9 +4524,9 @@ async function startRun(source = "unknown") {
 // ---------------- Scheduling ----------------
 async function scheduleAlarm({ clearDelayed = false } = {}) {
   const cfg = await getConfig();
-  await chrome.alarms.clear(ALARM_NAME);
 
   if (!cfg.enabled) {
+    await chrome.alarms.clear(ALARM_NAME);
     await clearDelayedStart();
     await clearInternetRetry();
     await chrome.storage.sync.set({ nextRunAt: null });
@@ -4461,6 +4539,22 @@ async function scheduleAlarm({ clearDelayed = false } = {}) {
   const profileSlot = await getProfileSlot();
   const slotOffsetMinutes = getSlotOffsetMinutes(profileSlot);
   const next = computeNextRunDate(cfg.time, slotOffsetMinutes);
+
+  const existingAlarm = await chrome.alarms.get(ALARM_NAME);
+  const isAlreadyScheduled =
+    existingAlarm &&
+    Math.abs(existingAlarm.scheduledTime - next.getTime()) < 1000;
+
+  if (isAlreadyScheduled && !clearDelayed) {
+    const data = await chrome.storage.sync.get("nextRunAt");
+    if (data.nextRunAt !== existingAlarm.scheduledTime) {
+      await chrome.storage.sync.set({ nextRunAt: existingAlarm.scheduledTime });
+    }
+    await updateBadge();
+    return;
+  }
+
+  await chrome.alarms.clear(ALARM_NAME);
   chrome.alarms.create(ALARM_NAME, { when: next.getTime() });
   await chrome.storage.sync.set({ nextRunAt: next.getTime() });
   await updateBadge();

@@ -39,11 +39,16 @@ An automation extension for Microsoft Edge that helps you **complete Bing Reward
 edge-bing-scheduler/
 ├─ manifest.json
 ├─ background.js
+├─ reward-dom-helpers.js
+├─ reward-scanner-helpers.js
+├─ script-result-helpers.js
 ├─ words.js
 ├─ popup.html
 ├─ popup.js
 ├─ options.html
-└─ options.js
+├─ options.js
+├─ docs/
+└─ tests/
 ```
 
 ---
