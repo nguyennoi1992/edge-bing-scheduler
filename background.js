@@ -1653,8 +1653,27 @@ async function autoClickRewards() {
               !!card.closest("[class*='completed'], [class*='Success']") ||
               (typeof window.isCardCompleted === "function"
                 ? window.isCardCompleted(card)
-                : !!card.querySelector("svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark']"));
-            const isCompleted = hasSuccessBadge || window.isCompletedQuestText(cardText);
+                : !!card.querySelector(
+                    "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+                  ));
+            let isCompleted = hasSuccessBadge;
+            if (!isCompleted && typeof window.isCardCompleted !== "function") {
+              const statusEls = card.querySelectorAll(
+                "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
+              );
+              for (const el of statusEls) {
+                const t = window.normalizeRewardText(el.textContent || "");
+                if (typeof window.isCompletedQuestText === "function") {
+                  if (window.isCompletedQuestText(t)) {
+                    isCompleted = true;
+                    break;
+                  }
+                } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                  isCompleted = true;
+                  break;
+                }
+              }
+            }
             const isActionable = window.isActionableQuestActivity({
               href,
               innerLabel: label,
@@ -1758,8 +1777,27 @@ async function autoClickRewards() {
                   !!candidate.closest("[class*='completed'], [class*='Success']") ||
                   (typeof window.isCardCompleted === "function"
                     ? window.isCardCompleted(candidate)
-                    : !!candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark']"));
-                const isCompleted = hasSuccessBadge || window.isCompletedQuestText(cardText);
+                    : !!candidate.querySelector(
+                        "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+                      ));
+                let isCompleted = hasSuccessBadge;
+                if (!isCompleted && typeof window.isCardCompleted !== "function") {
+                  const statusEls = candidate.querySelectorAll(
+                    "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
+                  );
+                  for (const el of statusEls) {
+                    const t = window.normalizeRewardText(el.textContent || "");
+                    if (typeof window.isCompletedQuestText === "function") {
+                      if (window.isCompletedQuestText(t)) {
+                        isCompleted = true;
+                        break;
+                      }
+                    } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                      isCompleted = true;
+                      break;
+                    }
+                  }
+                }
                 const isMatchable = window.isActionableQuestActivity({
                   href,
                   innerLabel: innerLabel || cardText,
