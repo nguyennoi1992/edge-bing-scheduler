@@ -15,9 +15,82 @@ const QUEST_HEADING_RE = /^(activities|hoạt động|tareas|activités|aufgaben
 const QUEST_META_RE = /^(status:|expires:|trạng thái:|hết hạn:)/i;
 const QUEST_CHROME_RE = /^(feedback|privacy|terms|microsoft|bing|search)$/i;
 const QUEST_CLOSE_RE = /^(back|close|quay lại|đóng|zurück|schließen|retour|fermer|volver|cerrar)$/i;
+const QUEST_INFO_RE =
+  /^(?:about(?:\s+(?:this\s+)?(?:quest|daily set|rewards|activities))?|về(?:\s+(?:nhiệm vụ|hoạt động))?|level up activities)$/i;
+const QUEST_STREAK_RE = /\b(?:\d+\s+days\s+in\s+a\s+row|for\s+\d+\s+days|streak)\b/i;
+
+export const READY_TO_CLAIM_LABEL_RE =
+  /^\s*(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?))?[\s!:]*|[\s!:]*)?\s*$/i;
+
+export const CLAIM_TEXT_RE =
+  /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^получить баллы$/i;
+
+export const CLAIM_MATCH_RE =
+  /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
+
+export function parsePointsFromText(text) {
+  const input = typeof text === "string" ? text : String(text ?? "");
+  // 1. Explicit points with keyword or plus (e.g. "+6", "6 points", "+1,000 pts")
+  const pointMatch =
+    input.match(/(?:\+\s*|\b)(\d[\d,.]*)\s*(?:points?|pts?)\b/i) ||
+    input.match(/\+\s*(\d[\d,.]*)\b(?!\s*(?:days?|hours?|hrs?|mins?|minutes?|ngày|giờ|phút|streak|friends?|bạn)(?:[\s,.]|$))/i);
+  if (pointMatch) {
+    const parsed = Number(pointMatch[1].replace(/[,.]/g, ""));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  // 2. Ready to claim / Claim card context: number near claim / pending (e.g. "Ready to claim 6 Claim", "6 Pending", "Ready to claim: +50")
+  const contextualMatch =
+    input.match(
+      /(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению|\bclaim\b|\bnhận\b|\breclamar\b|\beinlösen\b|\bpending\b)(?:\s+(?:points?|pts?|điểm|puntos))?[\s!:+\-]*\b(\d[\d,.]*)\b(?!\s*(?:days?|hours?|hrs?|mins?|minutes?|ngày|giờ|phút|of\b|\/\s*\d+)(?:[\s,.]|$))/i,
+    ) ||
+    input.match(/\b(\d[\d,.]*)\b[\s!:+\-]*(?:\bpending\b|\bclaim\b|\bnhận\b|\breclamar\b|\beinlösen\b)(?!\w)/i);
+  if (contextualMatch) {
+    const parsed = Number(contextualMatch[1].replace(/[,.]/g, ""));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  // 3. Standalone short number
+  const standaloneMatch = input.trim().match(/^(\d[\d,.]*)$/);
+  if (standaloneMatch) {
+    const parsed = Number(standaloneMatch[1].replace(/[,.]/g, ""));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
 
 export function isCompletedText(value) {
   return COMPLETED_RE.test(normalizeRewardText(value).toLowerCase());
+}
+
+export function collectProgressRatioMatches(text) {
+  if (!text) return [];
+  return [
+    ...text.matchAll(/(?<![\/\d])\b(\d+)\s*\/\s*([1-9]\d*)\b(?:\s+(?:tasks?|points?|pts?|quests?|activities|hoạt động|nhiệm vụ|tareas?|activités?|aufgaben))(?!\s*[\/\d])/gi),
+    ...text.matchAll(/\b(?:quests?|nhiệm vụ|hoạt động|tareas?|activités?|aufgaben)\s+(\d+)\s*\/\s*([1-9]\d*)\b(?!\s*[\/\d])/gi),
+    ...text.matchAll(/(?:\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e)[\s!:()\-–—[\]]*(\d+)\s*\/\s*([1-9]\d*)\b(?!\s*[\/\d])/gi),
+    ...text.matchAll(/(?<![\/\d])\b(\d+)\s*\/\s*([1-9]\d*)[\s!:()\-–—[\]]*(?:\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e)/gi),
+  ];
+}
+
+export function isCompletedQuestText(value) {
+  const text = normalizeRewardText(value);
+  if (!text) return false;
+
+  // 1. Collect all explicit progress ratio matches (tasks, points, quests, activities, completed prefix/suffix)
+  const allRatioMatches = collectProgressRatioMatches(text);
+  if (allRatioMatches.length > 0) {
+    return allRatioMatches.every((m) => Number(m[1]) >= Number(m[2]));
+  }
+
+  // 2. If no explicit ratios found, inspect completion keywords
+  if (isCompletedText(text)) return true;
+
+  // 3. Standalone ratio badge (e.g. "1/1", "5/5")
+  const exactRatioMatch = text.match(/^(\d+)\s*\/\s*([1-9]\d*)$/);
+  if (exactRatioMatch) {
+    return Number(exactRatioMatch[1]) >= Number(exactRatioMatch[2]);
+  }
+
+  return false;
 }
 
 export function findQuizCompletionPhrase(value) {
@@ -51,6 +124,7 @@ export function shouldFinishEmptyRewardScan({
 export function isActionableRewardCard(meta) {
   const href = meta.href || "";
   const text = normalizeRewardText(meta.text).toLowerCase();
+  const hasValidHref = Boolean(href && !/^(?:#|javascript:)/i.test(href.trim()));
 
   if (meta.isVisible === false) return false;
   if (meta.isDisabled) return false;
@@ -61,7 +135,7 @@ export function isActionableRewardCard(meta) {
   if (meta.isHeader) return false;
   if (!meta.hasVisual) return false;
   if (!text) return false;
-  if (!href && !meta.isPressable) return false;
+  if (!hasValidHref && !meta.isPressable) return false;
   if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) return false;
   // Only skip short navigation buttons like "Earn more" or "See more tasks",
   // NOT cards whose longer description happens to contain these phrases.
@@ -125,7 +199,7 @@ export function buildQuestCardKey({ href = "", text = "" }) {
   return `${href || "btn"}|${normalizeRewardText(text).toLowerCase()}`;
 }
 
-export function isActionableQuestActivity(meta) {
+export function isActionableQuestActivity(meta = {}) {
   const innerLabel = normalizeRewardText(meta.innerLabel);
   const ariaLabel = normalizeRewardText(meta.ariaLabel);
   const label = normalizeRewardText(`${ariaLabel} ${innerLabel}`).toLowerCase();
@@ -139,7 +213,34 @@ export function isActionableQuestActivity(meta) {
   if (QUEST_META_RE.test(label)) return false;
   if (QUEST_CHROME_RE.test(label)) return false;
   if (QUEST_CLOSE_RE.test(innerLabel)) return false;
-  if (meta.isCompleted) return false;
+  if (QUEST_INFO_RE.test(innerLabel) || QUEST_INFO_RE.test(ariaLabel) || QUEST_INFO_RE.test(label)) return false;
+  const hasValidHref = Boolean(meta.href && !/^(?:#|javascript:)/i.test(meta.href.trim()));
+  if (!hasValidHref && !meta.isPressable) return false;
+  if (!hasValidHref && QUEST_STREAK_RE.test(label)) return false;
+
+  if (meta.hasSuccessBadge) return false;
+
+  const standaloneRatioMatches = [innerLabel, ariaLabel, label]
+    .map((str) => (str || "").match(/^(\d+)\s*\/\s*([1-9]\d*)$/))
+    .filter(Boolean);
+
+  const hasIncompleteRatio = [
+    ...collectProgressRatioMatches(label),
+    ...standaloneRatioMatches,
+  ].some((m) => Number(m[1]) < Number(m[2]));
+
+  if (hasIncompleteRatio) {
+    return true;
+  }
+
+  if (
+    meta.isCompleted ||
+    isCompletedQuestText(label) ||
+    isCompletedQuestText(innerLabel) ||
+    isCompletedQuestText(ariaLabel)
+  ) {
+    return false;
+  }
 
   return true;
 }

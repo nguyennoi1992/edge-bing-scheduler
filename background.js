@@ -23,6 +23,7 @@ const BADGE_ALARM = "badgeTick";
 const REWARDS_SETTLE_MS = 8000;
 const REWARD_CHILD_SYNC_MS = 5000;
 const REWARD_URL_TIMEOUT_MS = 240000;
+const MIN_QUEST_REMAINING_BUDGET_MS = 60000;
 const DEBUG_LOGS_KEY = 'debugLogs';
 const DEBUG_LOG_RETENTION_DAYS = 7;
 const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -340,7 +341,7 @@ function isProtectedPageScriptError(error) {
   const message = String(error?.message || error?.originalError?.message || error || "");
   return (
     error?.code === "PAGE_SCRIPTING_BLOCKED" ||
-    /extensions gallery cannot be scripted/i.test(message)
+    /extensions gallery cannot be scripted|cannot be scripted by extensions|cannot access a (?:chrome|edge):\/\/|protected page/i.test(message)
   );
 }
 
@@ -402,6 +403,8 @@ async function injectDomHelpers(tabId) {
       const helpersReady =
         typeof window.normalizeRewardText === "function" &&
         typeof window.isCompletedText === "function" &&
+        typeof window.collectProgressRatioMatches === "function" &&
+        typeof window.isCompletedQuestText === "function" &&
         typeof window.isActionableRewardCard === "function" &&
         typeof window.buildRewardCardKey === "function" &&
         typeof window.buildQuestCardKey === "function" &&
@@ -410,7 +413,9 @@ async function injectDomHelpers(tabId) {
         typeof window.isDashboardRewardHref === "function" &&
         typeof window.findRewardCardRoots === "function" &&
         typeof window.isRewardSectionChrome === "function" &&
-        typeof window.shouldFinishEmptyRewardScan === "function";
+        typeof window.shouldFinishEmptyRewardScan === "function" &&
+        typeof window.parsePointsFromText === "function" &&
+        window.READY_TO_CLAIM_LABEL_RE instanceof RegExp;
       if (window.__rewardDomHelpersInjected && helpersReady) return;
       window.__rewardDomHelpersInjected = true;
 
@@ -418,11 +423,75 @@ async function injectDomHelpers(tabId) {
         return (value || "").replace(/\s+/g, " ").trim();
       };
 
+      window.READY_TO_CLAIM_LABEL_RE =
+        /^\s*(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?))?[\s!:]*|[\s!:]*)?\s*$/i;
+
+      window.parsePointsFromText = function parsePointsFromText(text) {
+        const input = typeof text === "string" ? text : String(text ?? "");
+        // 1. Explicit points with keyword or plus (e.g. "+6", "6 points", "+1,000 pts")
+        const pointMatch =
+          input.match(/(?:\+\s*|\b)(\d[\d,.]*)\s*(?:points?|pts?)\b/i) ||
+          input.match(/\+\s*(\d[\d,.]*)\b(?!\s*(?:days?|hours?|hrs?|mins?|minutes?|ngày|giờ|phút|streak|friends?|bạn)(?:[\s,.]|$))/i);
+        if (pointMatch) {
+          const parsed = Number(pointMatch[1].replace(/[,.]/g, ""));
+          if (Number.isFinite(parsed)) return parsed;
+        }
+        // 2. Ready to claim / Claim card context: number near claim / pending (e.g. "Ready to claim 6 Claim", "6 Pending", "Ready to claim: +50")
+        const contextualMatch =
+          input.match(
+            /(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению|\bclaim\b|\bnhận\b|\breclamar\b|\beinlösen\b|\bpending\b)(?:\s+(?:points?|pts?|điểm|puntos))?[\s!:+\-]*\b(\d[\d,.]*)\b(?!\s*(?:days?|hours?|hrs?|mins?|minutes?|ngày|giờ|phút|of\b|\/\s*\d+)(?:[\s,.]|$))/i,
+          ) ||
+          input.match(/\b(\d[\d,.]*)\b[\s!:+\-]*(?:\bpending\b|\bclaim\b|\bnhận\b|\breclamar\b|\beinlösen\b)(?!\w)/i);
+        if (contextualMatch) {
+          const parsed = Number(contextualMatch[1].replace(/[,.]/g, ""));
+          if (Number.isFinite(parsed)) return parsed;
+        }
+        // 3. Standalone short number
+        const standaloneMatch = input.trim().match(/^(\d[\d,.]*)$/);
+        if (standaloneMatch) {
+          const parsed = Number(standaloneMatch[1].replace(/[,.]/g, ""));
+          if (Number.isFinite(parsed)) return parsed;
+        }
+        return 0;
+      };
+
       const COMPLETED_RE =
         /\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e/i;
 
       window.isCompletedText = function isCompletedText(value) {
         return COMPLETED_RE.test(window.normalizeRewardText(value).toLowerCase());
+      };
+
+      window.collectProgressRatioMatches = function collectProgressRatioMatches(text) {
+        if (!text) return [];
+        return [
+          ...text.matchAll(/(?<![\/\d])\b(\d+)\s*\/\s*([1-9]\d*)\b(?:\s+(?:tasks?|points?|pts?|quests?|activities|hoạt động|nhiệm vụ|tareas?|activités?|aufgaben))(?!\s*[\/\d])/gi),
+          ...text.matchAll(/\b(?:quests?|nhiệm vụ|hoạt động|tareas?|activités?|aufgaben)\s+(\d+)\s*\/\s*([1-9]\d*)\b(?!\s*[\/\d])/gi),
+          ...text.matchAll(/(?:\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e)[\s!:()\-–—[\]]*(\d+)\s*\/\s*([1-9]\d*)\b(?!\s*[\/\d])/gi),
+          ...text.matchAll(/(?<![\/\d])\b(\d+)\s*\/\s*([1-9]\d*)[\s!:()\-–—[\]]*(?:\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e)/gi),
+        ];
+      };
+
+      window.isCompletedQuestText = function isCompletedQuestText(value) {
+        const text = window.normalizeRewardText(value);
+        if (!text) return false;
+
+        // 1. Collect all explicit progress ratio matches (tasks, points, quests, activities, completed prefix/suffix)
+        const allRatioMatches = window.collectProgressRatioMatches(text);
+        if (allRatioMatches.length > 0) {
+          return allRatioMatches.every((m) => Number(m[1]) >= Number(m[2]));
+        }
+
+        // 2. If no explicit ratios found, inspect completion keywords
+        if (window.isCompletedText(text)) return true;
+
+        // 3. Standalone ratio badge (e.g. "1/1", "5/5")
+        const exactRatioMatch = text.match(/^(\d+)\s*\/\s*([1-9]\d*)$/);
+        if (exactRatioMatch) {
+          return Number(exactRatioMatch[1]) >= Number(exactRatioMatch[2]);
+        }
+
+        return false;
       };
 
       window.isDashboardRewardHref = function isDashboardRewardHref(href) {
@@ -453,10 +522,14 @@ async function injectDomHelpers(tabId) {
       const QUEST_META_RE = /^(status:|expires:|tr\u1ea1ng th\u00e1i:|h\u1ebft h\u1ea1n:)/i;
       const QUEST_CHROME_RE = /^(feedback|privacy|terms|microsoft|bing|search)$/i;
       const QUEST_CLOSE_RE = /^(back|close|quay l\u1ea1i|\u0111\u00f3ng|zur\u00fcck|schlie\u00dfen|retour|fermer|volver|cerrar)$/i;
+      const QUEST_INFO_RE =
+        /^(?:about(?:\s+(?:this\s+)?(?:quest|daily set|rewards|activities))?|về(?:\s+(?:nhiệm vụ|hoạt động))?|level up activities)$/i;
+      const QUEST_STREAK_RE = /\b(?:\d+\s+days\s+in\s+a\s+row|for\s+\d+\s+days|streak)\b/i;
 
       window.isActionableRewardCard = function isActionableRewardCard(meta) {
         const href = meta.href || "";
         const text = window.normalizeRewardText(meta.text).toLowerCase();
+        const hasValidHref = Boolean(href && !/^(?:#|javascript:)/i.test(href.trim()));
 
         if (meta.isVisible === false) return false;
         if (meta.isDisabled) return false;
@@ -466,7 +539,7 @@ async function injectDomHelpers(tabId) {
         if (meta.isSectionChrome) return false;
         if (!meta.hasVisual) return false;
         if (!text) return false;
-        if (!href && !meta.isPressable) return false;
+        if (!hasValidHref && !meta.isPressable) return false;
         if (meta.isHeader) return false;
         if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) return false;
         // Only skip short navigation buttons like "Earn more" or "See more tasks",
@@ -485,7 +558,7 @@ async function injectDomHelpers(tabId) {
         return `${href || "btn"}|${window.normalizeRewardText(text).toLowerCase()}`;
       };
 
-      window.isActionableQuestActivity = function isActionableQuestActivity(meta) {
+      window.isActionableQuestActivity = function isActionableQuestActivity(meta = {}) {
         const innerLabel = window.normalizeRewardText(meta.innerLabel);
         const ariaLabel = window.normalizeRewardText(meta.ariaLabel);
         const label = window.normalizeRewardText(`${ariaLabel} ${innerLabel}`).toLowerCase();
@@ -499,7 +572,34 @@ async function injectDomHelpers(tabId) {
         if (QUEST_META_RE.test(label)) return false;
         if (QUEST_CHROME_RE.test(label)) return false;
         if (QUEST_CLOSE_RE.test(innerLabel)) return false;
-        if (meta.isCompleted) return false;
+        if (QUEST_INFO_RE.test(innerLabel) || QUEST_INFO_RE.test(ariaLabel) || QUEST_INFO_RE.test(label)) return false;
+        const hasValidHref = Boolean(meta.href && !/^(?:#|javascript:)/i.test(meta.href.trim()));
+        if (!hasValidHref && !meta.isPressable) return false;
+        if (!hasValidHref && QUEST_STREAK_RE.test(label)) return false;
+
+        if (meta.hasSuccessBadge) return false;
+
+        const standaloneRatioMatches = [innerLabel, ariaLabel, label]
+          .map((str) => (str || "").match(/^(\d+)\s*\/\s*([1-9]\d*)$/))
+          .filter(Boolean);
+
+        const hasIncompleteRatio = [
+          ...window.collectProgressRatioMatches(label),
+          ...standaloneRatioMatches,
+        ].some((m) => Number(m[1]) < Number(m[2]));
+
+        if (hasIncompleteRatio) {
+          return true;
+        }
+
+        if (
+          meta.isCompleted ||
+          window.isCompletedQuestText(label) ||
+          window.isCompletedQuestText(innerLabel) ||
+          window.isCompletedQuestText(ariaLabel)
+        ) {
+          return false;
+        }
 
         return true;
       };
@@ -525,6 +625,7 @@ async function autoClickRewards() {
 
   async function claimReadyPoints(tabId) {
     try {
+      await injectDomHelpers(tabId);
       const scriptResults =
         await executeRewardsScript(tabId, {
           func: async () => {
@@ -580,37 +681,54 @@ async function autoClickRewards() {
             return results;
           };
 
+          const centerPoint = (el) => {
+            const rect = el.getBoundingClientRect();
+            return {
+              clientX: Math.round(rect.left + Math.max(rect.width / 2, 1)),
+              clientY: Math.round(rect.top + Math.max(rect.height / 2, 1)),
+            };
+          };
+
           const clickElement = (el) => {
             if (!el) return false;
             try {
               el.scrollIntoView({ behavior: "instant", block: "center" });
             } catch { }
 
-            const eventTypes = [
-              "pointerover",
-              "pointerdown",
-              "mousedown",
-              "pointerup",
-              "mouseup",
-              "click",
+            try {
+              if (typeof el.focus === "function") el.focus();
+            } catch { }
+
+            const pt = centerPoint(el);
+            const common = {
+              view: window,
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              clientX: pt.clientX,
+              clientY: pt.clientY,
+              screenX: pt.clientX,
+              screenY: pt.clientY,
+            };
+
+            const PointerCtor = typeof PointerEvent !== "undefined" ? PointerEvent : MouseEvent;
+            const sequence = [
+              ["pointerover", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: 0 }],
+              ["pointerenter", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: 0 }],
+              ["mouseover", MouseEvent, { button: 0, buttons: 0 }],
+              ["mouseenter", MouseEvent, { button: 0, buttons: 0 }],
+              ["pointermove", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: 0 }],
+              ["mousemove", MouseEvent, { button: 0, buttons: 0 }],
+              ["pointerdown", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0.5, button: 0, buttons: 1 }],
+              ["mousedown", MouseEvent, { button: 0, buttons: 1 }],
+              ["pointerup", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0, button: 0, buttons: 0 }],
+              ["mouseup", MouseEvent, { button: 0, buttons: 0 }],
+              ["click", MouseEvent, { button: 0, buttons: 0 }],
             ];
-            for (const type of eventTypes) {
+
+            for (const [type, Ctor, extra] of sequence) {
               try {
-                const EventCtor =
-                  type.startsWith("pointer") && typeof PointerEvent === "function"
-                    ? PointerEvent
-                    : MouseEvent;
-                el.dispatchEvent(
-                  new EventCtor(type, {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    pointerId: 1,
-                    isPrimary: true,
-                    button: 0,
-                    buttons: 1,
-                  }),
-                );
+                el.dispatchEvent(new Ctor(type, { ...common, ...extra }));
               } catch { }
             }
 
@@ -625,24 +743,21 @@ async function autoClickRewards() {
             const labels = elements.filter((el) => {
               if (!(el instanceof HTMLElement)) return false;
               if (!isVisible(el)) return false;
-              return /^ready to claim$|^sẵn sàng nhận$|^可领取$|^prêt à réclamer$|^bereit zum einlösen$|^listo para reclamar$|^готово к получению$/i.test(getNodeText(el).toLowerCase());
+              const matcher = window.READY_TO_CLAIM_LABEL_RE || /^(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?))?[\s!:]*|[\s!:]*)?$/i;
+              return matcher.test(getNodeText(el));
             });
 
             for (const labelEl of labels) {
               const cardButton = labelEl.closest(
-                "button, [role='button'], a[role='button']",
+                "button, [role='button'], a[role='button'], [data-react-aria-pressable='true']",
               );
               if (!cardButton || !isVisible(cardButton)) continue;
+              if (cardButton.disabled || cardButton.getAttribute("aria-disabled") === "true") continue;
 
               const text = getNodeText(cardButton);
-              const matches = Array.from(
-                text.matchAll(/\b\d[\d,.]*\b/g),
-                (m) => m[0],
-              );
-              const numericValues = matches
-                .map((value) => Number(value.replace(/[,.]/g, "")))
-                .filter((value) => Number.isFinite(value));
-              const points = numericValues.length ? Math.max(...numericValues) : 0;
+              const points = typeof window.parsePointsFromText === "function"
+                ? window.parsePointsFromText(text)
+                : 0;
 
               if (points > 0) {
                 return { cardButton, points };
@@ -653,35 +768,40 @@ async function autoClickRewards() {
           };
 
           const findDialogClaimButton = () => {
-            const dialogs = collectAllElements(document).filter((el) => {
-              if (!(el instanceof HTMLElement)) return false;
-              if (!isVisible(el)) return false;
-              return (el.getAttribute("role") || "").toLowerCase() === "dialog";
-            });
-
             const CLAIM_TEXT_RE =
-              /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^готово к получению$|^получить баллы$/i;
+              /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^получить баллы$/i;
             const CLAIM_MATCH_RE =
               /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
 
-            for (const dialog of dialogs) {
-              if (!CLAIM_MATCH_RE.test(getNodeText(dialog))) continue;
+            const dialogs = collectAllElements(document).filter((el) => {
+              if (!(el instanceof HTMLElement)) return false;
+              if (!isVisible(el)) return false;
+              const role = (el.getAttribute("role") || "").toLowerCase();
+              return (
+                role === "dialog" ||
+                el.tagName.toLowerCase() === "dialog" ||
+                el.classList?.contains("shadow-shadowFlyout") ||
+                el.classList?.contains("bg-flyout") ||
+                el.getAttribute("aria-modal") === "true"
+              );
+            });
 
-              // 1. Search for an element with text matching "Claim points" inside a button
-              const labelEl = Array.from(dialog.querySelectorAll("*")).find((el) => {
+            if (!dialogs.length) return null;
+            const topDialogs = dialogs.filter((d) => !dialogs.some((other) => other !== d && other.contains(d)));
+
+            for (const scope of topDialogs) {
+              // 1. Search for an element with text matching "Claim points" inside or on a button
+              const candidateLabels = Array.from(
+                scope.querySelectorAll("button, [role='button'], [data-react-aria-pressable='true'], span, div, p, strong, b"),
+              ).filter((el) => {
                 if (!(el instanceof HTMLElement)) return false;
                 if (!isVisible(el)) return false;
-                if (!CLAIM_TEXT_RE.test(getNodeText(el))) return false;
-                return Boolean(
-                  el.closest(
-                    "button, [role='button'], input[type='button'], input[type='submit']",
-                  ),
-                );
+                return CLAIM_TEXT_RE.test(getNodeText(el));
               });
 
-              if (labelEl) {
+              for (const labelEl of candidateLabels) {
                 const btn = labelEl.closest(
-                  "button, [role='button'], input[type='button'], input[type='submit']",
+                  "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
                 );
                 if (
                   btn &&
@@ -694,10 +814,10 @@ async function autoClickRewards() {
               }
 
               // 2. Fallback: search for buttons whose text contains "claim points"
-              // (e.g. "103 Pending Claim points"), excluding dismiss/close controls
+              // (e.g. "6 Pending Claim points"), excluding dismiss/close controls
               const button = Array.from(
-                dialog.querySelectorAll(
-                  "button, [role='button'], input[type='button'], input[type='submit']",
+                scope.querySelectorAll(
+                  "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
                 ),
               ).find((el) => {
                 if (!(el instanceof HTMLElement)) return false;
@@ -707,6 +827,7 @@ async function autoClickRewards() {
                 if (/^(close|dismiss|how it works|đóng|bỏ qua)$/i.test(text)) return false;
                 const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
                 if (/close|dismiss/i.test(ariaLabel)) return false;
+                if (window.READY_TO_CLAIM_LABEL_RE ? window.READY_TO_CLAIM_LABEL_RE.test(text) : /ready to claim|sẵn sàng nhận|готово к получению|可领取/i.test(text)) return false;
                 return CLAIM_MATCH_RE.test(text);
               });
               if (button) return button;
@@ -728,10 +849,44 @@ async function autoClickRewards() {
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             await sleep(pollMs);
             const claimPointsButton = findDialogClaimButton();
-            if (!claimPointsButton) continue;
+            if (!claimPointsButton) {
+              if ((attempt + 1) % 3 === 0) {
+                console.log("[Rewards-Debug] claimReadyPoints: Dialog not opened yet, re-clicking card button...");
+                const currentCard = findReadyToClaimCard();
+                clickElement(currentCard?.cardButton || readyCard.cardButton);
+              }
+              continue;
+            }
 
             console.log("[Rewards-Debug] claimReadyPoints: Claim points dialog found. Clicking claim...");
-            clickElement(claimPointsButton);
+            const innerTarget = claimPointsButton.querySelector(
+              "[class*='brand' i], [class*='Button'], span[class*='text' i], span",
+            );
+            const targetEl =
+              innerTarget && isVisible(innerTarget) ? innerTarget : claimPointsButton;
+            const dialogScope =
+              claimPointsButton.closest("dialog, [role='dialog'], [class*='flyout' i], section") ||
+              null;
+            clickElement(targetEl);
+            await sleep(1500);
+
+            if (dialogScope) {
+              const closeSelectors =
+                "button[slot='close'], button[aria-label='Close' i], button[aria-label='Đóng' i], button[aria-label='Schließen' i], button[aria-label='Fermer' i], button[aria-label='Cerrar' i], button[aria-label='关闭' i], button[aria-label='Закрыть' i]";
+              const closeBtn =
+                Array.from(dialogScope.querySelectorAll(closeSelectors)).find((el) => el instanceof HTMLElement && isVisible(el)) ||
+                collectAllElements(dialogScope).find((el) => {
+                  if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
+                  if (!el.matches?.("button, [role='button'], [data-react-aria-pressable='true']")) return false;
+                  const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+                  const slot = el.getAttribute("slot") || "";
+                  return slot === "close" || /^(close|dismiss|đóng|schließen|fermer|cerrar|关闭|закрыть)$/i.test(aria);
+                });
+              if (closeBtn) {
+                clickElement(closeBtn);
+              }
+            }
+
             return {
               clicked: true,
               claimedPoints: readyCard.points,
@@ -1240,23 +1395,56 @@ async function autoClickRewards() {
 
             const linkText = window.normalizeRewardText(node.innerText || node.textContent || "");
             if (!linkText) continue;
+            if (window.isCompletedQuestText?.(linkText)) continue;
 
             const key = window.buildQuestCardKey({ href, text: linkText });
 
-            // Dedup by actual href (stable) to avoid re-processing the same quest
+            // Dedup by stable key to avoid re-processing the same quest
             // when dynamic text like "2/7 tasks" changes to "4/7 tasks" after activities.
-            if (seen.has(href)) continue;
-            seen.add(href);
+            const cleanText = (str) =>
+              str
+                ? window.normalizeRewardText(str)
+                    .replace(/\b\d+\s*\/\s*\d+(?:\s+tasks?)?\b/gi, "")
+                    .replace(/\bexpires\s+in\s+[^.]+/gi, "")
+                    .replace(/\s+/g, " ")
+                    .trim()
+                : "";
+            const normalizedButtonText = cleanText(linkText);
+            const cardContainer =
+              node.closest(".rounded-cornerCardDefault, [role='article'], li") ||
+              node.closest("div[class*='card' i]") ||
+              node;
+            const rawHeading =
+              node.querySelector("h2, h3, h4, [class*='title'], [class*='Title']")?.textContent ||
+              cardContainer.querySelector("h2, h3, h4, [class*='title'], [class*='Title']")?.textContent;
+            const cardId =
+              node.id ||
+              cleanText(node.getAttribute("aria-label")) ||
+              cleanText(rawHeading) ||
+              normalizedButtonText;
+            const domIndex = cardContainer.parentElement
+              ? Array.prototype.indexOf.call(cardContainer.parentElement.children, cardContainer)
+              : -1;
+            const isDistinctQuestHref = href && !/^(?:#|javascript:)/i.test(href);
+            const fallbackIndex = domIndex >= 0 ? domIndex : 0;
+            let stableKey;
+            if (isDistinctQuestHref) {
+              stableKey = cardId ? `${href}|${cardId}` : `${href}|${fallbackIndex}`;
+            } else {
+              stableKey = cardId ? `btn|${cardId}` : `btn|quest|${fallbackIndex}`;
+            }
+
+            if (seen.has(stableKey)) continue;
+            seen.add(stableKey);
 
             items.push({
               href: key,   // kept for clickQuestCard matching
               key: key,
-              actualHref: href, // stable key for attemptedQuestKeys dedup
+              actualHref: stableKey, // stable key for attemptedQuestKeys dedup
             });
           }
 
           console.log("[Rewards-Debug] getQuestCards: Returning " + items.length + " valid actionable quest cards.");
-          console.log("[Rewards-Debug] getQuestActivities: Returning " + items.length + " valid actionable activities.");
           return items;
         },
       });
@@ -1398,19 +1586,22 @@ async function autoClickRewards() {
             const innerLabel = window.normalizeRewardText(actionTarget.innerText || actionTarget.textContent || cardText);
             const ariaLabel = window.normalizeRewardText(actionTarget.getAttribute("aria-label") || "");
             const label = ariaLabel || innerLabel || cardText;
-            const isCompleted =
+            const hasSuccessBadge =
               !!card.closest("[class*='completed'], [class*='Success']") ||
-              !!card.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
-              window.isCompletedText(cardText);
+              !!card.querySelector("svg[class*='Success'], mee-icon[class*='Success']");
+            const isCompleted = hasSuccessBadge || window.isCompletedQuestText(cardText);
             const isActionable = window.isActionableQuestActivity({
+              href,
               innerLabel: label,
               ariaLabel: "",
               isVisible: true,
+              isPressable: actionTarget.matches?.("button, [role='button'], [role='link'], a[href], [data-react-aria-pressable='true']"),
               isDisabled:
                 actionTarget.getAttribute("aria-disabled") === "true" ||
                 !!actionTarget.closest("[aria-disabled='true'], [data-disabled='true']"),
               isInNav: !!card.closest("nav, header, [role='banner']"),
               isQuestCard: false,
+              hasSuccessBadge,
               isCompleted,
             });
             if (!isActionable) continue;
@@ -1498,19 +1689,23 @@ async function autoClickRewards() {
                   innerLabel: `${cardText} ${innerLabel || cardText}`,
                   ariaLabel: "",
                 });
+                const hasSuccessBadge =
+                  !!candidate.closest("[class*='completed'], [class*='Success']") ||
+                  !!candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success']");
+                const isCompleted = hasSuccessBadge || window.isCompletedQuestText(cardText);
                 const isMatchable = window.isActionableQuestActivity({
+                  href,
                   innerLabel: innerLabel || cardText,
                   ariaLabel: "",
                   isVisible: true,
+                  isPressable: target.matches?.("button, [role='button'], [role='link'], a[href], [data-react-aria-pressable='true']"),
                   isDisabled:
                     target.getAttribute("aria-disabled") === "true" ||
                     !!target.closest("[aria-disabled='true'], [data-disabled='true']"),
                   isInNav: !!candidate.closest("nav, header, [role='banner']"),
                   isQuestCard: false,
-                  isCompleted:
-                    !!candidate.closest("[class*='completed'], [class*='Success']") ||
-                    !!candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
-                    window.isCompletedText(cardText),
+                  hasSuccessBadge,
+                  isCompleted,
                 });
                 if (!isMatchable) continue;
 
@@ -2878,14 +3073,15 @@ async function autoClickRewards() {
             }
 
             // Wait for quiz to fully initialize before starting
-            await sleep(3000);
+            await sleep(2000);
 
             let clicks = 0;
             let lastClickedText = "";
             let sameClickCount = 0;
             let lastCandidateSnapshot = [];
+            let emptyCandidateRounds = 0;
 
-            for (let attempt = 0; attempt < 25; attempt++) {
+            for (let attempt = 0; attempt < 20; attempt++) {
               const completionEvidence = getQuizCompletionEvidence();
               if (completionEvidence) {
                 return {
@@ -2905,9 +3101,14 @@ async function autoClickRewards() {
               }));
 
               if (!candidates.length) {
+                emptyCandidateRounds++;
+                if (emptyCandidateRounds >= 5) {
+                  break;
+                }
                 await sleep(1500);
                 continue;
               }
+              emptyCandidateRounds = 0;
 
               // Avoid clicking the same element repeatedly (stale-click detection)
               let target = candidates[0];
@@ -3137,6 +3338,25 @@ async function autoClickRewards() {
       return result;
     };
 
+    let clickCount = 0;
+    let scanCount = 0;
+    let hydrationRetryCount = 0;
+    let consecutiveHydrationRetries = 0;
+    let lastHydrationStatus = "partial";
+    let lastScanSummary = null;
+
+    const makeIncompleteOutcome = (reason) => ({
+      status: "incomplete",
+      reason,
+      elapsedMs: Date.now() - startedAt,
+      remainingMs: remainingMs(),
+      clickCount,
+      scanCount,
+      hydrationRetryCount,
+      hydrationStatus: lastHydrationStatus,
+      scan: lastScanSummary,
+    });
+
     try {
       await ensureTabLoaded(tab.id, url);
       await ensureTabFocused(tab.id);
@@ -3152,11 +3372,7 @@ async function autoClickRewards() {
           actualUrl: currentTab.url,
           reason: "unexpected_redirect",
         });
-        return {
-          status: "incomplete",
-          reason: "unexpected_redirect",
-          elapsedMs: Date.now() - startedAt,
-        };
+        return makeIncompleteOutcome("unexpected_redirect");
       }
 
       // Inject helper functions into the page MAIN world so injected scripts can use them
@@ -3176,19 +3392,15 @@ async function autoClickRewards() {
           browser: getBrowserName(),
           reason,
         });
-        return {
-          status: "incomplete",
-          reason,
-          elapsedMs: Date.now() - startedAt,
-        };
+        return makeIncompleteOutcome(reason);
       }
 
-      if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        await appendDebugLog("info", "rewards", "Scanning for ready-to-claim card on dashboard", { url });
+      if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+        await appendDebugLog("info", "rewards", "Scanning for ready-to-claim card", { url });
         const claimResult = await claimReadyPoints(tab.id);
         if (claimResult.clicked) {
           console.log(
-            `[Rewards] Claimed ${claimResult.claimedPoints} ready point(s) from dashboard`,
+            `[Rewards] Claimed ${claimResult.claimedPoints} ready point(s) from ${url}`,
           );
           await appendDebugLog("success", "rewards", `Claimed ${claimResult.claimedPoints} ready point(s)`, {
             url,
@@ -3212,7 +3424,7 @@ async function autoClickRewards() {
           await new Promise((r) => setTimeout(r, 2000));
         } else {
           console.log(
-            `[Rewards] No ready points claimed on dashboard (${claimResult.reason || "not_available"})`,
+            `[Rewards] No ready points claimed (${claimResult.reason || "not_available"})`,
           );
           const message =
             claimResult.reason === "not_ready"
@@ -3227,13 +3439,13 @@ async function autoClickRewards() {
 
       if (/rewards\.bing\.com\/earn/i.test(url)) {
         const attemptedQuestKeys = new Set();
-        const maxQuestCards = 8;
+        const maxQuestCards = 3;
 
         for (let i = 0; i < maxQuestCards; i++) {
-          if (timedOut()) {
-            console.warn("[Rewards] Timeout budget reached while processing quest cards for " + url);
-            await appendDebugLog("warn", "rewards", "Timeout budget reached for quest cards", { url });
-            return { status: "incomplete", reason: "quest_timeout", elapsedMs: Date.now() - startedAt };
+          if (timedOut() || remainingMs() < MIN_QUEST_REMAINING_BUDGET_MS) {
+            console.warn("[Rewards] Low budget reached while processing quest cards for " + url);
+            await appendDebugLog("warn", "rewards", "Budget low, finishing quest cards early to reserve time for main cards", { url, remainingMs: remainingMs() });
+            break;
           }
           await appendDebugLog("info", "quests", "Scanning for quest cards", { url });
           console.log("[Rewards] processRewardUrl: Scanning for quest cards...");
@@ -3262,13 +3474,13 @@ async function autoClickRewards() {
           await new Promise((r) => setTimeout(r, 2000));
 
           const attemptedActivityKeys = new Set();
-          const maxQuestActivities = 10;
+          const maxQuestActivities = 6;
 
           for (let j = 0; j < maxQuestActivities; j++) {
-            if (timedOut()) {
-              console.warn("[Rewards] Timeout budget reached while processing quest activities for " + url);
-              await appendDebugLog("warn", "rewards", "Timeout budget reached for quest activities", { url });
-              return { status: "incomplete", reason: "quest_activity_timeout", elapsedMs: Date.now() - startedAt };
+            if (timedOut() || remainingMs() < MIN_QUEST_REMAINING_BUDGET_MS) {
+              console.warn("[Rewards] Low budget reached while processing quest activities for " + url);
+              await appendDebugLog("warn", "rewards", "Budget low, finishing quest activities early", { url, remainingMs: remainingMs() });
+              break;
             }
             await appendDebugLog("info", "quests", "Scanning for quest activities for " + nextQuest.href);
             console.log("[Rewards] processRewardUrl: Scanning for quest activities...");
@@ -3393,12 +3605,6 @@ async function autoClickRewards() {
       const cardAttemptCounts = new Map();
       const maxRewardCardClicks = 8;
       const maxAttemptsPerCard = 2;
-      let clickCount = 0;
-      let scanCount = 0;
-      let hydrationRetryCount = 0;
-      let consecutiveHydrationRetries = 0;
-      let lastHydrationStatus = "partial";
-      let lastScanSummary = null;
       let pendingVerification = null;
       let currentDocumentHydrated = false;
 
@@ -3436,17 +3642,6 @@ async function autoClickRewards() {
           sectionIds: relevantSections.map((section) => section.sectionId),
         };
       };
-      const makeIncompleteOutcome = (reason) => ({
-        status: "incomplete",
-        reason,
-        elapsedMs: Date.now() - startedAt,
-        remainingMs: remainingMs(),
-        clickCount,
-        scanCount,
-        hydrationRetryCount,
-        hydrationStatus: lastHydrationStatus,
-        scan: lastScanSummary,
-      });
 
       while (true) {
         if (timedOut()) {

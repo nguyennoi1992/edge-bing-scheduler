@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard live HTML browser test</title>
+  <style>
+    body { font-family: sans-serif; }
+    .rounded-cornerCardDefault { display: block; width: 280px; min-height: 44px; margin: 8px; }
+    svg { width: 16px; height: 16px; }
+  </style>
+  <script src="../../reward-scanner-helpers.js"></script>
+</head>
+<body>
+  <main id="result" data-status="pending">RUNNING: dashboard-live</main>
+
+  <!-- Ready to claim button from live HTML -->
+  <button class="group/ctrl text-start cursor-pointer disabled:cursor-default outline-0 outline-ctrlFocusOuterStroke outline-offset-(--spacing-ctrlFocusInnerStrokeWidth) data-focus-visible:outline-ctrlFocusOuterStrokeWidth w-full rounded-cornerCardDefault" data-rac="" type="button" tabindex="0" aria-expanded="false" id="react-aria-_R_2hlav5t6bslbH1_" data-react-aria-pressable="true">
+    <div class="flex size-full flex-col gap-gapBetweenContentSmall p-paddingCardDefault overflow-hidden rounded-cornerCardDefault bg-bgCardOnPrimaryDefaultRest forced-colors:border border border-strokeCardOnPrimaryRest cursor-pointer hover:bg-bgCardOnPrimaryDefaultHover active:bg-bgCardOnPrimaryDefaultPressed hover:[&amp;_img]:scale-110 hover:border-strokeCardOnPrimaryHover active:border-strokeCardOnPrimaryPressed shadow-shadowCardRest hover:shadow-shadowCardHover active:shadow-shadowCardPressed h-full w-full">
+      <div class="flex grow flex-col p-paddingCardBodyDefaultOutside gap-3">
+        <div class="flex items-center justify-between text-fgCtrlNeutralSecondaryRest">
+          <p class="text-labelControl">Ready to claim</p>
+        </div>
+        <div class="flex grow items-center gap-2">
+          <img alt="Ready to claim" decoding="async" loading="lazy" class="text-transparent shrink-0" width="32" height="32" src="https://bing.com/th?id=OMR.Icons.CoinsTransparent.svg&amp;pid=Rewards&amp;qlt=100&amp;r=0">
+          <div class="flex">
+            <p class="text-pageHeader">6</p>
+            <div class="ms-1 mt-2 h-1.5 w-1.5 rounded-cornerCircular bg-statusDangerBg"></div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 text-fgCtrlNeutralSecondaryRest">
+          <p class="text-metadata">Claim</p>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="size-3.5 -rotate-90 rtl:rotate-90"><path fill="currentColor" d="M4.22 8.47a.75.75 0 0 1 1.06 0L12 15.19l6.72-6.72a.75.75 0 1 1 1.06 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L4.22 9.53a.75.75 0 0 1 0-1.06"></path></svg>
+        </div>
+      </div>
+    </div>
+  </button>
+
+  <!-- #dailyset from live HTML -->
+  <section id="dailyset" class="scroll-mt-28 xl:scroll-mt-19">
+    <div class="react-aria-Disclosure" data-rac="" data-expanded="true">
+      <div class="-mx-5 flex flex-wrap items-center gap-2 rounded-cornerCardDefault p-3 px-5">
+        <div class="flex max-w-full grow-9999 items-center gap-2">
+          <h2 class="truncate text-sectionHeader">Daily set</h2>
+          <button class="group/ctrl cursor-pointer rounded-cornerCtrlSmRest text-labelButtonSm w-sizeCtrlSmDefault -ms-1 p-1" data-rac="" type="button" tabindex="0" aria-expanded="false" id="react-aria-_R_1lklav5t6bslbH1_" data-react-aria-pressable="true" aria-label="About Daily set">
+            <span class="relative inline-flex items-center p-0"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="size-4 text-fgCtrlNeutralSecondaryRest"><path fill="currentColor" d="M12 1.999c5.524 0 10.002 4.478 10.002 10.002 0 5.523-4.478 10.001-10.002 10.001S1.998 17.524 1.998 12.001C1.998 6.477 6.476 1.999 12 1.999"></path></svg></span>
+          </button>
+        </div>
+        <div class="flex grow items-center justify-between gap-2 wrap-anywhere">
+          <div class="hidden sm:block">
+            <span class="text-metadata flex items-center gap-1 text-fgCtrlNeutralSecondaryRest"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="size-3.5 shrink-0"><path fill="currentColor" d="M12 2c5.523 0 10 4.478 10 10s-4.477 10-10 10S2 17.522 2 12 6.477 2 12 2"></path></svg>Resets in 16h</span>
+          </div>
+          <button id="react-aria-_R_4lav5t6bslbH1_" class="group/ctrl cursor-pointer w-sizeCtrlDefault p-1.5" data-rac="" type="button" tabindex="0" data-react-aria-pressable="true" aria-label="Daily set" aria-expanded="true" aria-controls="react-aria-_R_4lav5t6bslbH2_" slot="trigger">
+            <span class="relative inline-flex items-center p-0"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="size-4 rotate-180"><path fill="currentColor" d="M4.22 8.47a.75.75 0 0 1 1.06 0L12 15.19l6.72-6.72a.75.75 0 1 1 1.06 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L4.22 9.53a.75.75 0 0 1 0-1.06"></path></svg></span>
+          </button>
+        </div>
+      </div>
+      <div class="react-aria-DisclosurePanel" data-rac="" id="react-aria-_R_4lav5t6bslbH2_" role="group" aria-labelledby="react-aria-_R_4lav5t6bslbH1_" aria-hidden="false">
+        <div class="flex flex-col">
+          <div class="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+            <a class="group/ctrl cursor-pointer rounded-cornerCardDefault" data-rac="" data-testid="card-events" href="https://www.bing.com/search?q=Events+near+me&amp;form=ML2X97&amp;OCID=ML2X97&amp;PUBL=RewardsDO&amp;CREA=ML2X97&amp;rnoreward=1&amp;filters=BTEPOKey%3A%22REWARDSQUIZ_DailySet_UrlOffer%22+BTDSUOID%3A%22Global_DailySet_20261015_Child1%22" target="_blank" rel="noopener noreferrer" tabindex="0" data-react-aria-pressable="true">
+              <div class="flex size-full gap-gapBetweenContentSmall p-paddingCardDefault overflow-hidden rounded-cornerCardDefault bg-bgCardOnPrimaryDefaultRest border border-strokeCardOnPrimaryRest flex-row">
+                <div class="relative shrink-0 overflow-hidden rounded-cornerCardNestedDefaultOutside bg-bgCtrlNeutralDisabled aspect-square h-24.5">
+                  <img alt="Upcoming events near me" decoding="async" loading="lazy" class="text-transparent absolute inset-0 h-full w-full object-cover" sizes="98px" src="https://bing.com/th?id=OMR.TimeUrgent.jpg&amp;pid=Rewards&amp;qlt=100&amp;r=0">
+                </div>
+                <div class="flex grow flex-col p-paddingCardBodyDefaultOutside gap-2">
+                  <div class="flex grow flex-col gap-0.5">
+                    <p class="line-clamp-3 text-globalBody2Strong">Upcoming events near me</p>
+                    <p class="line-clamp-3 text-fgCtrlNeutralSecondaryRest">Exciting sports, music, and cultural events coming soon.</p>
+                  </div>
+                  <div class="flex w-full items-center gap-2">
+                    <div class="flex h-5 w-fit min-w-5 shrink-0 items-center justify-center gap-0.5 rounded-cornerCircular px-1.5 border border-strokeDividerDefault bg-statusInformativeTintBg">
+                      <p class="text-metadata leading-none text-statusInformativeTintFg">+10</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </a>
+            <a class="group/ctrl cursor-pointer rounded-cornerCardDefault" data-rac="" data-testid="card-chicago" href="https://www.bing.com/search?q=Trip+to+Chicago&amp;FORM=tgrew4&amp;filters=sid:&quot;59663805-68ee-440a-a250-ab8d4d047ae3&quot;&amp;rnoreward=1" target="_blank" rel="noopener noreferrer" tabindex="0" data-react-aria-pressable="true">
+              <div class="flex size-full gap-gapBetweenContentSmall p-paddingCardDefault overflow-hidden rounded-cornerCardDefault bg-bgCardOnPrimaryDefaultRest border border-strokeCardOnPrimaryRest flex-row">
+                <div class="relative shrink-0 overflow-hidden rounded-cornerCardNestedDefaultOutside bg-bgCtrlNeutralDisabled aspect-square h-24.5">
+                  <img alt="Chicago Windy Foliage" decoding="async" loading="lazy" class="text-transparent absolute inset-0 h-full w-full object-cover" sizes="98px" src="https://bing.com/th?id=OMR.fallFallingLeaf.jpg&amp;pid=Rewards&amp;qlt=100&amp;r=0">
+                </div>
+                <div class="flex grow flex-col p-paddingCardBodyDefaultOutside gap-2">
+                  <div class="flex grow flex-col gap-0.5">
+                    <p class="line-clamp-3 text-globalBody2Strong">Chicago Windy Foliage</p>
+                    <p class="line-clamp-3 text-fgCtrlNeutralSecondaryRest">Lakefront parks in autumn tones</p>
+                  </div>
+                  <div class="flex w-full items-center gap-2">
+                    <div class="flex h-5 w-fit min-w-5 shrink-0 items-center justify-center gap-0.5 rounded-cornerCircular px-1.5 border border-strokeDividerDefault bg-statusInformativeTintBg">
+                      <p class="text-metadata leading-none text-statusInformativeTintFg">+10</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </a>
+            <a class="group/ctrl cursor-pointer rounded-cornerCardDefault" data-rac="" data-testid="card-borobudur" href="https://www.bing.com/search?q=Borobudur+quiz&amp;form=dsetqu&amp;filters=IsConversation:%22True%22+WQOskey:%22Borobudur_quiz_202610%22++%20mgzv3configlist%3a%22BingQA_QuizLanding_Layout%22" target="_blank" rel="noopener noreferrer" tabindex="0" data-react-aria-pressable="true">
+              <div class="flex size-full gap-gapBetweenContentSmall p-paddingCardDefault overflow-hidden rounded-cornerCardDefault bg-bgCardOnPrimaryDefaultRest border border-strokeCardOnPrimaryRest flex-row">
+                <div class="relative shrink-0 overflow-hidden rounded-cornerCardNestedDefaultOutside bg-bgCtrlNeutralDisabled aspect-square h-24.5">
+                  <img alt="Borobudur Majesty?" decoding="async" loading="lazy" class="text-transparent absolute inset-0 h-full w-full object-cover" sizes="98px" src="https://bing.com/th?id=OMR.QuestionMark.jpg&amp;pid=Rewards&amp;qlt=100&amp;r=0">
+                </div>
+                <div class="flex grow flex-col p-paddingCardBodyDefaultOutside gap-2">
+                  <div class="flex grow flex-col gap-0.5">
+                    <p class="line-clamp-3 text-globalBody2Strong">Borobudur Majesty?</p>
+                    <p class="line-clamp-3 text-fgCtrlNeutralSecondaryRest">Test your knowledge about Borobudur in this short quiz.</p>
+                  </div>
+                  <div class="flex w-full items-center gap-2">
+                    <div class="flex h-5 w-fit min-w-5 shrink-0 items-center justify-center gap-0.5 rounded-cornerCircular px-1.5 border border-strokeDividerDefault bg-statusInformativeTintBg">
+                      <p class="text-metadata leading-none text-statusInformativeTintFg">+10</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Flyout from live HTML -->
+  <div class="self-end" data-rac="">
+    <section id="react-aria-_R_2hlav5t6bslb_" class="outline-0" data-rac="" aria-labelledby="react-aria7315260451-_r_1_" role="dialog" tabindex="-1">
+      <div class="flex h-dvh flex-col overflow-hidden shadow-shadowFlyout bg-flyout w-[min(100vw,350px)] min-[350px]:rounded-s-cornerFlyoutRest border border-strokeFlyout backdrop-blur-ctrlDialogBaseBgBlur">
+        <div class="flex items-start gap-2 px-4 pt-3 pb-2 min-[350px]:px-5">
+          <h2 id="react-aria7315260451-_r_1_" slot="title" class="line-clamp-3 grow pt-1 text-sectionHeader wrap-anywhere">Claim points</h2>
+          <button class="group/ctrl cursor-pointer" data-rac="" type="button" tabindex="0" data-react-aria-pressable="true" aria-label="Close" id="react-aria7315260451-_r_5_" slot="close">
+            <span class="relative inline-flex items-center p-0">Close</span>
+          </button>
+        </div>
+        <div class="relative grow px-4 py-2 min-[350px]:px-5 scrollbar-thin scrollbar-panel overflow-auto">
+          <div class="flex flex-col gap-4">
+            <button class="group/ctrl text-start cursor-pointer disabled:cursor-default outline-0 outline-ctrlFocusOuterStroke outline-offset-(--spacing-ctrlFocusInnerStrokeWidth) data-focus-visible:outline-ctrlFocusOuterStrokeWidth w-full rounded-cornerCardDefault" data-rac="" type="button" tabindex="0" data-react-aria-pressable="true" id="react-aria7315260451-_r_7_">
+              <div class="flex size-full flex-col gap-gapBetweenContentSmall p-paddingCardDefault overflow-hidden rounded-cornerCardDefault bg-bgCardOnPrimaryDefaultRest forced-colors:border border border-strokeCardOnPrimaryRest cursor-pointer hover:bg-bgCardOnPrimaryDefaultHover active:bg-bgCardOnPrimaryDefaultPressed shadow-shadowCardRest">
+                <div class="flex grow flex-col gap-1.5 p-paddingCardBodyDefaultOutside">
+                  <div class="flex items-center gap-2">
+                    <p class="grow text-pageHeader">6</p>
+                    <div class="inline-flex items-center gap-ctrlBadgeGap"><p class="px-paddingCtrlTextSide">Pending</p></div>
+                  </div>
+                  <div class="relative inline-flex items-center justify-center text-center bg-bgCtrlBrandRest text-fgCtrlOnBrandRest">
+                    <span class="relative px-paddingCtrlTextSide inline-flex items-center">Claim points</span>
+                  </div>
+                </div>
+              </div>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script type="module">
+    import {
+      assert,
+      assertEqual,
+      collectActionableRewardCards,
+      findDialogClaimButton,
+      findReadyToClaimCard,
+      finishBrowserTest,
+    } from "./reward-browser-test-helpers.js";
+
+    await finishBrowserTest("dashboard live HTML card scanning", () => {
+      const daily = collectActionableRewardCards(document.getElementById("dailyset")).cards;
+      const dailyIds = daily.map((card) => card.dataset.testid);
+
+      assertEqual(daily.length, 3, "dashboard should find all 3 daily-set cards in live HTML");
+      assert(dailyIds.includes("card-events"), "events card should be actionable");
+      assert(dailyIds.includes("card-chicago"), "chicago card should be actionable");
+      assert(dailyIds.includes("card-borobudur"), "borobudur card should be actionable");
+
+      // Verify ready-to-claim detection
+      const ready = findReadyToClaimCard(document);
+      assert(ready !== null, "ready-to-claim card should be found");
+      assertEqual(ready.points, 6, "contains 6 points");
+
+      // Verify claim-points flyout button detection
+      const claimBtn = findDialogClaimButton(document);
+      assert(claimBtn !== null, "claim points button should be found inside flyout");
+      assertEqual(claimBtn.id, "react-aria7315260451-_r_7_", "matches claim points button id");
+    });
+  </script>
+</body>
+</html>
