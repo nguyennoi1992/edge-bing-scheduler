@@ -197,6 +197,32 @@
       const claimBtn = findDialogClaimButton(document);
       assert(claimBtn !== null, "claim points button should be found inside flyout");
       assertEqual(claimBtn.id, "react-aria7315260451-_r_7_", "matches claim points button id");
+
+      // Verify collapsed section expansion via expandRewardSection
+      const dailysetSec = document.getElementById("dailyset");
+      const triggerBtn = dailysetSec.querySelector("[slot='trigger']");
+      const panelEl = dailysetSec.querySelector(".react-aria-DisclosurePanel");
+      assert(triggerBtn !== null && panelEl !== null, "trigger and panel should exist");
+
+      // Simulate collapsed state
+      triggerBtn.setAttribute("aria-expanded", "false");
+      panelEl.setAttribute("aria-hidden", "true");
+      panelEl.style.display = "none";
+      triggerBtn.addEventListener("click", () => {
+        triggerBtn.setAttribute("aria-expanded", "true");
+        panelEl.setAttribute("aria-hidden", "false");
+        panelEl.style.display = "";
+      });
+
+      assert(typeof globalThis.expandRewardSection === "function", "expandRewardSection helper should be defined");
+      globalThis.expandRewardSection(dailysetSec);
+
+      assertEqual(triggerBtn.getAttribute("aria-expanded"), "true", "trigger should be marked expanded");
+      assertEqual(panelEl.getAttribute("aria-hidden"), "false", "panel should be marked not hidden");
+      assert(panelEl.style.display !== "none", "panel display:none should be removed");
+
+      const dailyAfterExpand = collectActionableRewardCards(dailysetSec).cards;
+      assertEqual(dailyAfterExpand.length, 3, "all 3 daily-set cards should be actionable after expandRewardSection");
     });
   </script>
 </body>

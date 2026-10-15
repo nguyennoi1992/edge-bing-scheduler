@@ -412,6 +412,7 @@ async function injectDomHelpers(tabId) {
         typeof window.buildQuestActivityKey === "function" &&
         typeof window.isDashboardRewardHref === "function" &&
         typeof window.findRewardCardRoots === "function" &&
+        typeof window.expandRewardSection === "function" &&
         typeof window.isRewardSectionChrome === "function" &&
         typeof window.shouldFinishEmptyRewardScan === "function" &&
         typeof window.parsePointsFromText === "function" &&
@@ -1228,24 +1229,48 @@ async function autoClickRewards() {
               (window.isCompletedText || ((v) => /\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong/i.test(normalizeText(v).toLowerCase())))(value);
 
             const isVisible = (el) => {
-              if (!el || typeof el.getBoundingClientRect !== "function") return false;
-              const rect = el.getBoundingClientRect();
+              if (!el) return false;
               const style = window.getComputedStyle(el);
-              return (
-                rect.width > 0 &&
-                rect.height > 0 &&
-                style.visibility !== "hidden" &&
-                style.display !== "none"
-              );
+              if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                return false;
+              }
+              if (typeof el.checkVisibility === "function") {
+                if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+                  return false;
+                }
+              }
+              if (typeof el.getBoundingClientRect === "function") {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) return true;
+                for (const child of el.children || []) {
+                  if (typeof child.getBoundingClientRect === "function") {
+                    const childRect = child.getBoundingClientRect();
+                    if (childRect.width > 0 && childRect.height > 0) return true;
+                  }
+                }
+              }
+              return false;
             };
 
             const expandSectionIfCollapsed = (section) => {
               if (!section) return;
-              const triggers = section.querySelectorAll(
-                "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls]",
-              );
+              if (typeof window.expandRewardSection === "function") {
+                try {
+                  window.expandRewardSection(section);
+                  return;
+                } catch { }
+              }
+              const triggers = section.querySelectorAll?.(
+                "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls], [data-rac][aria-expanded='false'][slot='trigger'], [data-react-aria-pressable='true'][aria-expanded='false'], [aria-expanded='false'][aria-controls], [role='button'][aria-expanded='false'][aria-controls]",
+              ) || [];
               for (const trigger of triggers) {
-                try { trigger.click(); } catch { }
+                try {
+                  if (typeof window.dispatchRewardPress === "function") {
+                    window.dispatchRewardPress(trigger);
+                  } else {
+                    trigger.click();
+                  }
+                } catch { }
               }
             };
 
@@ -1345,9 +1370,18 @@ async function autoClickRewards() {
               const directRoundedAnchors = document.querySelectorAll(
                 "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
               ).length;
+              const targetSectionDirectRoundedAnchors = sections.reduce(
+                (sum, s) =>
+                  sum +
+                  (s.querySelectorAll?.(
+                    "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
+                  )?.length || 0),
+                0,
+              );
               const hydrated =
                 hydratedCards > 0 ||
-                directRoundedAnchors > 0 ||
+                targetSectionDirectRoundedAnchors > 0 ||
+                (sections.length === 0 && directRoundedAnchors > 0) ||
                 allowPreviouslyHydratedEmpty === true;
               const hasTargetSection = sections.length > 0;
 
@@ -1992,34 +2026,48 @@ async function autoClickRewards() {
       func: (sectionIds, carriedStableEmptySince, maxWaitMs, allowPreviouslyHydratedEmpty) => {
         return new Promise((resolve) => {
           const isVisible = (el) => {
-            if (!el || typeof el.getBoundingClientRect !== "function") return false;
-            const rect = el.getBoundingClientRect();
+            if (!el) return false;
             const style = window.getComputedStyle(el);
-            return (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              style.visibility !== "hidden" &&
-              style.display !== "none"
-            );
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+              return false;
+            }
+            if (typeof el.checkVisibility === "function") {
+              if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+                return false;
+              }
+            }
+            if (typeof el.getBoundingClientRect === "function") {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) return true;
+              for (const child of el.children || []) {
+                if (typeof child.getBoundingClientRect === "function") {
+                  const childRect = child.getBoundingClientRect();
+                  if (childRect.width > 0 && childRect.height > 0) return true;
+                }
+              }
+            }
+            return false;
           };
 
             function expandSectionIfCollapsed(section) {
               if (!section) return;
-              // React Aria Disclosure pattern: button[slot='trigger']
-              const trigger = section.querySelector(
-                "button[slot='trigger'][aria-expanded='false']",
-              );
-              if (trigger) {
+              if (typeof window.expandRewardSection === "function") {
                 try {
-                  trigger.click();
+                  window.expandRewardSection(section);
+                  return;
                 } catch { }
               }
-              // Also handle aria-expanded on buttons with aria-controls
-              const collapsedBtns = section.querySelectorAll(
-                "button[aria-expanded='false'][aria-controls]",
-              );
-              for (const btn of collapsedBtns) {
-                try { btn.click(); } catch { }
+              const triggers = section.querySelectorAll?.(
+                "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls], [data-rac][aria-expanded='false'][slot='trigger'], [data-react-aria-pressable='true'][aria-expanded='false'], [aria-expanded='false'][aria-controls], [role='button'][aria-expanded='false'][aria-controls]",
+              ) || [];
+              for (const trigger of triggers) {
+                try {
+                  if (typeof window.dispatchRewardPress === "function") {
+                    window.dispatchRewardPress(trigger);
+                  } else {
+                    trigger.click();
+                  }
+                } catch { }
               }
             }
 
@@ -2339,11 +2387,15 @@ async function autoClickRewards() {
                 card.querySelector("img[alt]");
               const rawTitle =
                 titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
-              return window.buildRewardCardKey({
-                href,
-                title: rawTitle,
-                text: card?.innerText || card?.textContent || "",
-              });
+              if (typeof window.buildRewardCardKey === "function") {
+                return window.buildRewardCardKey({
+                  href,
+                  title: rawTitle,
+                  text: card?.innerText || card?.textContent || "",
+                });
+              }
+              const normalized = (rawTitle || card?.innerText || card?.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+              return `${href || "btn"}|${normalized}`;
             }
 
             function collectCards(cards) {
@@ -2535,15 +2587,27 @@ async function autoClickRewards() {
         func: async (keyToClick, sectionIds) => {
           console.log("[Rewards-Debug] clickRewardCard: Attempting to click reward card with key:", keyToClick);
           const isVisible = (el) => {
-            if (!el || typeof el.getBoundingClientRect !== "function") return false;
-            const rect = el.getBoundingClientRect();
+            if (!el) return false;
             const style = window.getComputedStyle(el);
-            return (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              style.visibility !== "hidden" &&
-              style.display !== "none"
-            );
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+              return false;
+            }
+            if (typeof el.checkVisibility === "function") {
+              if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+                return false;
+              }
+            }
+            if (typeof el.getBoundingClientRect === "function") {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) return true;
+              for (const child of el.children || []) {
+                if (typeof child.getBoundingClientRect === "function") {
+                  const childRect = child.getBoundingClientRect();
+                  if (childRect.width > 0 && childRect.height > 0) return true;
+                }
+              }
+            }
+            return false;
           };
 
           const isDisabled = (el) =>
@@ -2555,20 +2619,23 @@ async function autoClickRewards() {
 
           function expandSectionIfCollapsed(section) {
             if (!section) return;
-            const trigger = section.querySelector(
-              "button[slot='trigger'][aria-expanded='false']",
-            );
-            if (trigger) {
+            if (typeof window.expandRewardSection === "function") {
               try {
-                trigger.click();
+                window.expandRewardSection(section);
+                return;
               } catch { }
             }
-            // Also handle aria-expanded on buttons with aria-controls
-            const collapsedBtns = section.querySelectorAll(
-              "button[aria-expanded='false'][aria-controls]",
-            );
-            for (const btn of collapsedBtns) {
-              try { btn.click(); } catch { }
+            const triggers = section.querySelectorAll?.(
+              "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls], [data-rac][aria-expanded='false'][slot='trigger'], [data-react-aria-pressable='true'][aria-expanded='false'], [aria-expanded='false'][aria-controls], [role='button'][aria-expanded='false'][aria-controls]",
+            ) || [];
+            for (const trigger of triggers) {
+              try {
+                if (typeof window.dispatchRewardPress === "function") {
+                  window.dispatchRewardPress(trigger);
+                } else {
+                  trigger.click();
+                }
+              } catch { }
             }
           }
 
@@ -2719,11 +2786,15 @@ async function autoClickRewards() {
               card.querySelector("img[alt]");
             const rawTitle =
               titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
-            return window.buildRewardCardKey({
-              href,
-              title: rawTitle,
-              text: card?.innerText || card?.textContent || "",
-            });
+            if (typeof window.buildRewardCardKey === "function") {
+              return window.buildRewardCardKey({
+                href,
+                title: rawTitle,
+                text: card?.innerText || card?.textContent || "",
+              });
+            }
+            const normalized = (rawTitle || card?.innerText || card?.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            return `${href || "btn"}|${normalized}`;
           }
 
           function getCardSignature(card) {
@@ -2734,7 +2805,9 @@ async function autoClickRewards() {
               card.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ||
               "";
             const disabled = isDisabled(card) ? "disabled" : "enabled";
-            const status = window.normalizeRewardText(card?.innerText || card?.textContent || "").toLowerCase();
+            const status = (typeof window.normalizeRewardText === "function"
+              ? window.normalizeRewardText(card?.innerText || card?.textContent || "")
+              : (card?.innerText || card?.textContent || "").replace(/\s+/g, " ").trim()).toLowerCase();
             return `${href}|${expanded}|${disabled}|${status}`;
           }
 
@@ -2945,9 +3018,18 @@ async function autoClickRewards() {
             card = cardsList.find((a) => {
               const candKey = buildCardKey(a);
               const candHref = a.getAttribute("href") || a.querySelector("a[href]")?.getAttribute("href") || "";
+              const fullText = typeof window.normalizeRewardText === "function"
+                ? window.normalizeRewardText(a.innerText || a.textContent || "")
+                : (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim();
+              const fullTextKey = typeof window.buildRewardCardKey === "function"
+                ? window.buildRewardCardKey({ href: candHref, text: fullText })
+                : `${candHref || "btn"}|${fullText.toLowerCase()}`;
               const targetHrefPart = keyToClick.split("|")[0];
-              return candKey === keyToClick || 
-                (candHref && targetHrefPart && candHref === targetHrefPart && candHref !== "#" && candHref !== "/earn");
+              return (
+                candKey === keyToClick ||
+                fullTextKey === keyToClick ||
+                (candHref && targetHrefPart && candHref === targetHrefPart && candHref !== "#" && candHref !== "/earn")
+              );
             });
             if (card) break;
             await sleep(800);
@@ -3525,6 +3607,8 @@ async function autoClickRewards() {
           await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
           await chrome.tabs.reload(tab.id);
           await ensureTabLoaded(tab.id, url);
+          await chrome.tabs.update(tab.id, { active: true });
+          await ensureTabFocused(tab.id);
 
           const currentTabAfterReload = await chrome.tabs.get(tab.id);
           console.log("[Rewards] After reload:", currentTabAfterReload.url);

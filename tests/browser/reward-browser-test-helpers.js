@@ -12,10 +12,27 @@ import {
 } from "../../reward-dom-helpers.js";
 
 function isVisible(element) {
-  if (!element || typeof element.getBoundingClientRect !== "function") return false;
-  const rect = element.getBoundingClientRect();
+  if (!element) return false;
   const style = getComputedStyle(element);
-  return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+    return false;
+  }
+  if (typeof element.checkVisibility === "function") {
+    if (!element.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+      return false;
+    }
+  }
+  if (typeof element.getBoundingClientRect === "function") {
+    const rect = element.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return true;
+    for (const child of element.children || []) {
+      if (typeof child.getBoundingClientRect === "function") {
+        const childRect = child.getBoundingClientRect();
+        if (childRect.width > 0 && childRect.height > 0) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function getCardMeta(card, rootNode) {
