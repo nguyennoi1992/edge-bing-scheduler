@@ -415,6 +415,7 @@ async function injectDomHelpers(tabId) {
         typeof window.isRewardSectionChrome === "function" &&
         typeof window.shouldFinishEmptyRewardScan === "function" &&
         typeof window.parsePointsFromText === "function" &&
+        typeof window.isCardCompleted === "function" &&
         window.READY_TO_CLAIM_LABEL_RE instanceof RegExp;
       if (window.__rewardDomHelpersInjected && helpersReady) return;
       window.__rewardDomHelpersInjected = true;
@@ -489,6 +490,68 @@ async function injectDomHelpers(tabId) {
         const exactRatioMatch = text.match(/^(\d+)\s*\/\s*([1-9]\d*)$/);
         if (exactRatioMatch) {
           return Number(exactRatioMatch[1]) >= Number(exactRatioMatch[2]);
+        }
+
+        return false;
+      };
+
+      window.isCardCompleted = function isCardCompleted(cardEl) {
+        if (!cardEl) return false;
+        const BADGE_SELECTOR =
+          "[class*='statusSuccess'], [class*='Success'], [class*='CheckMark'], [class*='checkMark']";
+        const DIRECT_BADGE_SELECTOR =
+          "svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], svg[class*='Success'], mee-icon[class*='Success'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']";
+
+        const matchedList = cardEl.querySelectorAll?.(BADGE_SELECTOR);
+        let matchedElements = [];
+        if (matchedList) {
+          matchedElements = Array.from(matchedList);
+        } else {
+          const single = cardEl.querySelector?.(BADGE_SELECTOR);
+          if (single) matchedElements = [single];
+        }
+
+        const badgeElements = [
+          ...(typeof cardEl.matches === "function" && cardEl.matches(DIRECT_BADGE_SELECTOR) ? [cardEl] : []),
+          ...matchedElements,
+        ];
+
+        for (const successBadge of badgeElements) {
+          const isDirectIcon =
+            successBadge.tagName?.toLowerCase() === "svg" ||
+            successBadge.tagName?.toLowerCase() === "mee-icon";
+          const classStr =
+            typeof successBadge.className === "string"
+              ? successBadge.className
+              : successBadge.getAttribute?.("class") || "";
+          const hasCheckmarkClass = /mee-icon-CheckMark|\bcheck-?mark\b/i.test(classStr);
+          const hasSuccessClass = /Success/i.test(classStr);
+
+          if (isDirectIcon && (hasCheckmarkClass || hasSuccessClass)) {
+            return true;
+          }
+          if (
+            successBadge !== cardEl &&
+            (hasCheckmarkClass || hasSuccessClass) &&
+            Boolean(successBadge.querySelector?.(DIRECT_BADGE_SELECTOR))
+          ) {
+            return true;
+          }
+        }
+
+        const statusEls =
+          cardEl.querySelectorAll?.(
+            "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
+          ) || [];
+        for (const el of statusEls) {
+          const t = typeof window.normalizeRewardText === "function"
+            ? window.normalizeRewardText(el.textContent || "")
+            : (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (typeof window.isCompletedQuestText === "function") {
+            if (window.isCompletedQuestText(t)) return true;
+          } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+            return true;
+          }
         }
 
         return false;
@@ -1588,7 +1651,9 @@ async function autoClickRewards() {
             const label = ariaLabel || innerLabel || cardText;
             const hasSuccessBadge =
               !!card.closest("[class*='completed'], [class*='Success']") ||
-              !!card.querySelector("svg[class*='Success'], mee-icon[class*='Success']");
+              (typeof window.isCardCompleted === "function"
+                ? window.isCardCompleted(card)
+                : !!card.querySelector("svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark']"));
             const isCompleted = hasSuccessBadge || window.isCompletedQuestText(cardText);
             const isActionable = window.isActionableQuestActivity({
               href,
@@ -1691,7 +1756,9 @@ async function autoClickRewards() {
                 });
                 const hasSuccessBadge =
                   !!candidate.closest("[class*='completed'], [class*='Success']") ||
-                  !!candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success']");
+                  (typeof window.isCardCompleted === "function"
+                    ? window.isCardCompleted(candidate)
+                    : !!candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark']"));
                 const isCompleted = hasSuccessBadge || window.isCompletedQuestText(cardText);
                 const isMatchable = window.isActionableQuestActivity({
                   href,
@@ -1919,25 +1986,30 @@ async function autoClickRewards() {
             }
 
             function isCardCompleted(cardEl) {
+              if (typeof window.isCardCompleted === "function") {
+                return window.isCardCompleted(cardEl);
+              }
               if (!cardEl) return false;
-              const successBadge = cardEl.querySelector(
-                "[class*='statusSuccess']"
-              );
-              if (successBadge && successBadge.querySelector("svg")) {
+              if (
+                cardEl.querySelector(
+                  "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+                )
+              ) {
                 return true;
               }
-
               const statusEls = cardEl.querySelectorAll(
-                "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
+                "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
               );
               for (const el of statusEls) {
-                const t = window.normalizeRewardText(el.textContent || "").toLowerCase();
-                if (window.isCompletedText(t)) return true;
+                const t = typeof window.normalizeRewardText === "function"
+                  ? window.normalizeRewardText(el.textContent || "")
+                  : (el.textContent || "").replace(/\s+/g, " ").trim();
+                if (typeof window.isCompletedQuestText === "function") {
+                  if (window.isCompletedQuestText(t)) return true;
+                } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                  return true;
+                }
               }
-
-              const fullText = window.normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
-              if (window.isCompletedText(fullText)) return true;
-
               return false;
             }
 
@@ -2463,24 +2535,30 @@ async function autoClickRewards() {
           }
 
           function isCardCompleted(cardEl) {
+            if (typeof window.isCardCompleted === "function") {
+              return window.isCardCompleted(cardEl);
+            }
             if (!cardEl) return false;
-            const successBadge = cardEl.querySelector(
-              "[class*='statusSuccess']"
-            );
-            if (successBadge && successBadge.querySelector("svg")) {
+            if (
+              cardEl.querySelector(
+                "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+              )
+            ) {
               return true;
             }
-
             const statusEls = cardEl.querySelectorAll(
-              "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
+              "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
             );
             for (const el of statusEls) {
-              const t = window.normalizeRewardText(el.textContent || "").toLowerCase();
-              if (window.isCompletedText(t)) return true;
+              const t = typeof window.normalizeRewardText === "function"
+                ? window.normalizeRewardText(el.textContent || "")
+                : (el.textContent || "").replace(/\s+/g, " ").trim();
+              if (typeof window.isCompletedQuestText === "function") {
+                if (window.isCompletedQuestText(t)) return true;
+              } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                return true;
+              }
             }
-
-            const fullText = window.normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
-            if (window.isCompletedText(fullText)) return true;
             return false;
           }
 

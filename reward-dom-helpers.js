@@ -93,6 +93,62 @@ export function isCompletedQuestText(value) {
   return false;
 }
 
+export function isCardCompleted(cardEl) {
+  if (!cardEl) return false;
+  const BADGE_SELECTOR =
+    "[class*='statusSuccess'], [class*='Success'], [class*='CheckMark'], [class*='checkMark']";
+  const DIRECT_BADGE_SELECTOR =
+    "svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], svg[class*='Success'], mee-icon[class*='Success'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']";
+
+  const matchedList = cardEl.querySelectorAll?.(BADGE_SELECTOR);
+  let matchedElements = [];
+  if (matchedList) {
+    matchedElements = Array.from(matchedList);
+  } else {
+    const single = cardEl.querySelector?.(BADGE_SELECTOR);
+    if (single) matchedElements = [single];
+  }
+
+  const badgeElements = [
+    ...(typeof cardEl.matches === "function" && cardEl.matches(DIRECT_BADGE_SELECTOR) ? [cardEl] : []),
+    ...matchedElements,
+  ];
+
+  for (const successBadge of badgeElements) {
+    const isDirectIcon =
+      successBadge.tagName?.toLowerCase() === "svg" ||
+      successBadge.tagName?.toLowerCase() === "mee-icon";
+    const classStr =
+      typeof successBadge.className === "string"
+        ? successBadge.className
+        : successBadge.getAttribute?.("class") || "";
+    const hasCheckmarkClass = /mee-icon-CheckMark|\bcheck-?mark\b/i.test(classStr);
+    const hasSuccessClass = /Success/i.test(classStr);
+
+    if (isDirectIcon && (hasCheckmarkClass || hasSuccessClass)) {
+      return true;
+    }
+    if (
+      successBadge !== cardEl &&
+      (hasCheckmarkClass || hasSuccessClass) &&
+      Boolean(successBadge.querySelector?.(DIRECT_BADGE_SELECTOR))
+    ) {
+      return true;
+    }
+  }
+
+  const statusEls =
+    cardEl.querySelectorAll?.(
+      "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
+    ) || [];
+  for (const el of statusEls) {
+    const t = normalizeRewardText(el.textContent || "");
+    if (isCompletedQuestText(t)) return true;
+  }
+
+  return false;
+}
+
 export function findQuizCompletionPhrase(value) {
   return normalizeRewardText(value).match(QUIZ_COMPLETION_RE)?.[0] || "";
 }

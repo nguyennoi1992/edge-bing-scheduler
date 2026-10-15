@@ -12,7 +12,9 @@ cleanup() {
     kill "$edge_pid" 2>/dev/null || true
     wait "$edge_pid" 2>/dev/null || true
   fi
-  rm -rf -- "$test_tmp"
+  if [[ -n "${test_tmp:-}" ]]; then
+    rm -rf -- "$test_tmp" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 

@@ -9,6 +9,7 @@ import {
   getRewardHydrationRetryDelay,
   isActionableQuestActivity,
   isActionableRewardCard,
+  isCardCompleted,
   isCompletedQuestText,
   isDashboardRewardHref,
   isRewardsPageUrl,
@@ -534,4 +535,239 @@ test("isActionableRewardCard rejects placeholder hrefs when not pressable", () =
     }),
     true,
   );
+});
+
+test("isCardCompleted correctly identifies completed cards via SVG badges, mee-icon, and text", () => {
+  const BADGE_SELECTOR = "[class*='statusSuccess'], [class*='Success'], [class*='CheckMark'], [class*='checkMark']";
+
+  // 1. Direct SVG with Tailwind text-statusSuccessTintFg (live modern Rewards HTML)
+  const modernSvgEl = {
+    tagName: "svg",
+    className: "size-5 shrink-0 text-statusSuccessTintFg",
+    getAttribute: (attr) => (attr === "class" ? "size-5 shrink-0 text-statusSuccessTintFg" : null),
+  };
+  const modernSvgCard = {
+    matches: () => false,
+    querySelector: (sel) => (sel === BADGE_SELECTOR ? modernSvgEl : null),
+    querySelectorAll: (sel) => (sel === BADGE_SELECTOR ? [modernSvgEl] : []),
+    innerText: "Upcoming events near me",
+  };
+  assert.equal(isCardCompleted(modernSvgCard), true, "direct SVG text-statusSuccessTintFg");
+
+  // 2. Wrapper container with statusSuccess containing an SVG checkmark
+  const childSuccessSvg = {
+    tagName: "svg",
+    className: "size-5 shrink-0 text-statusSuccessTintFg",
+    getAttribute: (attr) => (attr === "class" ? "size-5 shrink-0 text-statusSuccessTintFg" : null),
+  };
+  const wrapperEl = {
+    tagName: "div",
+    className: "rounded-full bg-statusSuccessTintBg",
+    querySelector: (sub) => (sub.includes("statusSuccess") || sub.includes("Success") ? childSuccessSvg : null),
+  };
+  const wrapperCard = {
+    matches: () => false,
+    querySelector: (sel) => (sel === BADGE_SELECTOR ? wrapperEl : null),
+    querySelectorAll: (sel) => (sel === BADGE_SELECTOR ? [wrapperEl] : []),
+    innerText: "Chicago Windy Foliage",
+  };
+  assert.equal(isCardCompleted(wrapperCard), true, "wrapper with svg checkmark child");
+
+  // 3. Classic mee-icon-CheckMark
+  const classicMeeIconEl = {
+    tagName: "mee-icon",
+    className: "mee-icon-CheckMark",
+    getAttribute: (attr) => (attr === "class" ? "mee-icon-CheckMark" : null),
+  };
+  const classicMeeIconCard = {
+    matches: () => false,
+    querySelector: (sel) => (sel === BADGE_SELECTOR ? classicMeeIconEl : null),
+    querySelectorAll: (sel) => (sel === BADGE_SELECTOR ? [classicMeeIconEl] : []),
+    innerText: "Daily quiz",
+  };
+  assert.equal(isCardCompleted(classicMeeIconCard), true, "classic mee-icon-CheckMark");
+
+  // 4. Completed text in metadata element
+  const textCompletedCard = {
+    matches: () => false,
+    querySelector: () => null,
+    querySelectorAll: (sel) => {
+      if (sel.includes("metadata")) {
+        return [{ textContent: "Đã xong" }];
+      }
+      return [];
+    },
+    innerText: "Daily poll",
+  };
+  assert.equal(isCardCompleted(textCompletedCard), true, "completed text in metadata");
+
+  // 5. Completion word in general card description should NOT falsely trigger completion
+  const descriptionKeywordCard = {
+    matches: () => false,
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    innerText: "Get things done with Bing search",
+  };
+  assert.equal(isCardCompleted(descriptionKeywordCard), false, "instructional description with 'done' should not trigger completion");
+
+  // 6. Uncompleted card (informative badge, +10)
+  const uncompletedCard = {
+    matches: () => false,
+    querySelector: () => null,
+    querySelectorAll: (sel) => {
+      if (sel.includes("metadata")) {
+        return [{ textContent: "+10" }];
+      }
+      return [];
+    },
+    innerText: "Upcoming events near me Exciting sports +10",
+  };
+  assert.equal(isCardCompleted(uncompletedCard), false, "uncompleted card with +10");
+
+  // 7. Card with incomplete progress ratio should NOT be completed even if it contains "completed"
+  const incompleteRatioCard = {
+    matches: () => false,
+    querySelector: () => null,
+    querySelectorAll: (sel) => {
+      if (sel.includes("metadata")) {
+        return [{ textContent: "0/1 tasks completed" }];
+      }
+      return [];
+    },
+    innerText: "Daily searches - 0/1 tasks completed",
+  };
+  assert.equal(isCardCompleted(incompleteRatioCard), false, "incomplete ratio with 'completed' keyword must be false");
+
+  // 8. Card with completed progress ratio
+  const completedRatioCard = {
+    matches: () => false,
+    querySelector: () => null,
+    querySelectorAll: (sel) => {
+      if (sel.includes("metadata")) {
+        return [{ textContent: "3/3 completed" }];
+      }
+      return [];
+    },
+    innerText: "Daily searches - 3/3 completed",
+  };
+  assert.equal(isCardCompleted(completedRatioCard), true, "completed ratio 3/3 must be true");
+
+  // 9. Container with statusSuccess but NO icon or SVG child should NOT trigger completion
+  const iconlessContainer = {
+    matches: () => false,
+    querySelector: (sel) => {
+      if (sel === BADGE_SELECTOR) {
+        return {
+          tagName: "div",
+          className: "statusSuccessContainer",
+          querySelector: () => null,
+        };
+      }
+      return null;
+    },
+    querySelectorAll: () => [],
+    innerText: "Active task without icon",
+  };
+  assert.equal(isCardCompleted(iconlessContainer), false, "iconless container with statusSuccess should not trigger completion");
+
+  // 10. Non-shadowing: iconless container before an actual checkmark badge
+  const nonShadowingCard = {
+    matches: () => false,
+    querySelectorAll: (sel) => {
+      if (sel === BADGE_SELECTOR) {
+        return [
+          {
+            tagName: "div",
+            className: "statusSuccessContainer",
+            querySelector: () => null,
+          },
+          {
+            tagName: "svg",
+            className: "size-5 shrink-0 text-statusSuccessTintFg",
+            getAttribute: (attr) => (attr === "class" ? "size-5 shrink-0 text-statusSuccessTintFg" : null),
+          },
+        ];
+      }
+      return [];
+    },
+    innerText: "Daily searches",
+  };
+  assert.equal(isCardCompleted(nonShadowingCard), true, "subsequent completion badge is detected even if preceded by iconless container");
+
+  // 11. Card container itself with statusSuccess does not falsely complete from unrelated decorative icons
+  const cardWithClassAndCoinIcon = {
+    matches: () => false,
+    className: "rounded-cornerCardDefault statusSuccess",
+    querySelectorAll: (sel) => {
+      if (sel === BADGE_SELECTOR) {
+        return [];
+      }
+      return [];
+    },
+    querySelector: (sub) => (sub === "svg, mee-icon" ? { tagName: "svg", className: "coin-icon" } : null),
+    innerText: "Daily search with coin icon",
+  };
+  assert.equal(isCardCompleted(cardWithClassAndCoinIcon), false, "card element with statusSuccess class does not treat whole-subtree decorative icons as completion");
+
+  // 13. Iconless wrapper with checkmark class should NOT trigger completion
+  const iconlessCheckmarkWrapper = {
+    matches: () => false,
+    querySelector: (sel) => {
+      if (sel === BADGE_SELECTOR) {
+        return {
+          tagName: "div",
+          className: "checkMarkWrapper",
+          querySelector: () => null,
+        };
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel === BADGE_SELECTOR) {
+        return [
+          {
+            tagName: "div",
+            className: "checkMarkWrapper",
+            querySelector: () => null,
+          },
+        ];
+      }
+      return [];
+    },
+    innerText: "Daily poll with text wrapper",
+  };
+  assert.equal(isCardCompleted(iconlessCheckmarkWrapper), false, "iconless wrapper with checkmark class should not trigger completion");
+
+  // 14. Sub-wrapper with statusSuccess containing an unrelated icon (e.g. coin icon) should NOT trigger completion
+  const wrapperWithUnrelatedIcon = {
+    matches: () => false,
+    querySelector: (sel) => {
+      if (sel === BADGE_SELECTOR) {
+        return {
+          tagName: "div",
+          className: "statusSuccessContainer",
+          querySelector: (sub) => (sub.includes("statusSuccess") ? null : { tagName: "svg", className: "coin-icon" }),
+        };
+      }
+      return null;
+    },
+    querySelectorAll: (sel) => {
+      if (sel === BADGE_SELECTOR) {
+        return [
+          {
+            tagName: "div",
+            className: "statusSuccessContainer",
+            querySelector: (sub) => (sub.includes("statusSuccess") ? null : { tagName: "svg", className: "coin-icon" }),
+          },
+        ];
+      }
+      return [];
+    },
+    innerText: "Daily searches with coin",
+  };
+  assert.equal(isCardCompleted(wrapperWithUnrelatedIcon), false, "wrapper with statusSuccess and unrelated coin icon must not be completed");
+
+  // 15. Null/undefined safety
+  assert.equal(isCardCompleted(null), false, "null card");
+  assert.equal(isCardCompleted(undefined), false, "undefined card");
 });

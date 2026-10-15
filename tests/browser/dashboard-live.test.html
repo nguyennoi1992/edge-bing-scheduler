@@ -156,9 +156,14 @@
       findDialogClaimButton,
       findReadyToClaimCard,
       finishBrowserTest,
+      isCardCompleted,
     } from "./reward-browser-test-helpers.js";
 
     await finishBrowserTest("dashboard live HTML card scanning", () => {
+      const eventsCard = document.querySelector("[data-testid='card-events']");
+      assert(eventsCard !== null, "events card should exist");
+      assert(!isCardCompleted(eventsCard), "events card initially not completed");
+
       const daily = collectActionableRewardCards(document.getElementById("dailyset")).cards;
       const dailyIds = daily.map((card) => card.dataset.testid);
 
@@ -166,6 +171,22 @@
       assert(dailyIds.includes("card-events"), "events card should be actionable");
       assert(dailyIds.includes("card-chicago"), "chicago card should be actionable");
       assert(dailyIds.includes("card-borobudur"), "borobudur card should be actionable");
+
+      // Verify completion detection via modern Tailwind direct SVG class (text-statusSuccessTintFg)
+      const badgePill = eventsCard.querySelector(".bg-statusInformativeTintBg");
+      assert(badgePill !== null, "events card should contain informative badge pill");
+      const savedHtml = badgePill.outerHTML;
+      try {
+        badgePill.outerHTML = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="size-5 shrink-0 text-statusSuccessTintFg"><path fill="currentColor" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"></path></svg>';
+        assert(isCardCompleted(eventsCard), "events card should be detected as completed via direct SVG text-statusSuccessTintFg");
+
+        const dailyAfter = collectActionableRewardCards(document.getElementById("dailyset")).cards;
+        assertEqual(dailyAfter.length, 2, "completed card should be excluded from actionable cards");
+        assert(!dailyAfter.map((c) => c.dataset.testid).includes("card-events"), "completed events card should be excluded");
+      } finally {
+        const svgEl = eventsCard.querySelector("svg.text-statusSuccessTintFg");
+        if (svgEl) svgEl.outerHTML = savedHtml;
+      }
 
       // Verify ready-to-claim detection
       const ready = findReadyToClaimCard(document);

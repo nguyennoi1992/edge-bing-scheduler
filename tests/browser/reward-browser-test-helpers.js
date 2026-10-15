@@ -5,7 +5,7 @@ import {
   buildRewardCardKey,
   classifyRewardScanState,
   isActionableRewardCard,
-  isCompletedText,
+  isCardCompleted,
   isDashboardRewardHref,
   normalizeRewardText,
   parsePointsFromText,
@@ -16,16 +16,6 @@ function isVisible(element) {
   const rect = element.getBoundingClientRect();
   const style = getComputedStyle(element);
   return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-}
-
-function isCardCompleted(card) {
-  const successBadge = card.querySelector("[class*='statusSuccess']");
-  if (successBadge?.querySelector("svg")) return true;
-
-  for (const element of card.querySelectorAll("[class*='metadata'], [class*='fgCtrlNeutralSecondary']")) {
-    if (isCompletedText(element.textContent || "")) return true;
-  }
-  return isCompletedText(card.innerText || card.textContent || "");
 }
 
 function getCardMeta(card, rootNode) {
@@ -220,3 +210,5 @@ export function findDialogClaimButton(rootNode = document) {
 
   return null;
 }
+
+export { isCardCompleted };
