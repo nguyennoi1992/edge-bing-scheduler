@@ -37,11 +37,30 @@ Trong debug logs:
 3. **Bổ sung Safe Fallback cho Helper Functions:**
    - Bọc an toàn các lệnh gọi `window.normalizeRewardText` và `window.buildRewardCardKey` để tránh `TypeError` trong môi trường script injection.
 
-### 1.4. Kết quả kiểm chứng thực tế
-- **Bộ test tự động:** 22/22 Node tests, 4/4 Edge browser tests, Extension smoke test toàn bộ PASS.
+### 1.4. Bổ sung bộ lọc Non-href & Tinh chỉnh Target Sections (2026-10-20)
+1. **Lọc triệt để các phần tử không có href (`!hasValidHref`):**
+   - Trong `section#streaks` và `section#levelup`, Microsoft hiển thị các badge và nút tiến trình ("1,000 BONUS", "Bing search streak", "Daily set streak", "Complete the Daily Set for 7 days in a row").
+   - Cập nhật `isActionableRewardCard` và `isRewardSectionChrome` để loại bỏ các phần tử non-href khớp với:
+     - `/^(?:(?:\+?\d[\d,.]*\s+)?bonus|.*streak|level up activities)$/i`
+     - `/\b\d+\s+days\s+in\s+a\s+row\b/i`
+     - `/^\+?\d+(?:\s*(?:pts?|points?|days?|ngày))?$/i` (các mốc số trần không có động từ nhận điểm).
+   - Đồng thời lọc bỏ các liên kết điều hướng nội bộ của Microsoft Rewards (`/about`, `/redeem`, `/refer`, `/status`, `/optout`).
+   - Giữ lại duy nhất nút nhận điểm thật ("Ready to claim" / "Claim points").
+2. **Chuẩn hóa `targetSectionIds` & điều kiện Hydration:**
+   - Trên `/earn`: mục tiêu là `["moreactivities", "exploreonbing"]` (không đưa `#streaks` vào vì streak chỉ là tracker tiến trình).
+   - Trên `/dashboard`: mục tiêu là `["dailyset", "moreactivities", "offers"]`.
+   - Trong `allRelevantHydrated`: Cho phép bỏ qua các section trống hoặc chỉ chứa chrome (`directRoundedAnchors === 0 && completed === 0 && accepted === 0`) giúp trang hoàn tất sớm ngay khi toàn bộ thẻ hiện hữu đã hoàn thành mà không phải lặp retry vô ích.
+
+### 1.5. Kết quả kiểm chứng thực tế
+- **Bộ test tự động:** 24/24 Node tests, 4/4 Edge browser tests, Extension smoke test toàn bộ PASS.
 - **Test Chrome thực tế với Default Profile:**
-  - Khởi chạy Google Chrome với bản clone an toàn từ profile Default.
-  - Cả 3 thẻ Daily Set ("Borobudur quiz", "Events near me", "Trip to Chicago") đều được nhận diện, mở rộng accordion, click tự động và ghi nhận hoàn thành (`SUCCESS: Reward card completed or disappeared after click`).
+  - Khởi chạy Google Chrome với bản clone an toàn từ profile Default dưới virtual display (Xvfb).
+  - Cả 3 thẻ Daily Set ("Trip to Tokyo", "Trip to Cairns", "Portrait of a Lady on Fire quiz") đều được nhận diện, mở rộng accordion, click tự động và ghi nhận hoàn thành.
+  - Thẻ thông tin `/about` ("Welcome to Microsoft Rewards") được nhận diện đúng là link điều hướng và bỏ qua.
+- **Test Chrome thực tế với Profile 1:**
+  - Nhận diện chính xác flight `vsstreak` (không có `dailyset` trên Dashboard ban đầu).
+  - Tự động phục hồi Daily Set và hiển thị Streak Badge 132 ngày thông qua cơ chế fallback Panelflyout.
+  - Tự động hoàn tất 100% các hoạt động Quests và 5 thẻ trong `moreactivities`.
 
 ---
 
@@ -80,6 +99,35 @@ Qua kiểm tra trực tiếp cấu trúc DOM, React Server Components và Teleme
    - Nguyên nhân: Trong bundle mã nguồn của Microsoft có đoạn:
      `"messages":{"Earn":{"Streaks":{"activateButton":"Activate streak", ... "Now you can turn on streak protection to protect your streak!"}}}`
    - Tài khoản khi chuyển sang flight `vsstreak` cần người dùng thao tác thủ công một lần để "Kích hoạt Streak" (Activate streak / Streak Protection) trên web hoặc ứng dụng Bing. Do chưa được kích hoạt, API trả về Suspense fallback vô tận.
+
+---
+
+### 2.3. Giải pháp Khôi phục Daily Set & Streak Hiển thị trên Profile 1 (2026-10-20)
+Để giải quyết yêu cầu hiển thị lại các thẻ Daily Set và chuỗi Streak cho tài khoản trong Profile 1 như tài khoản ở Profile Default:
+1. **Khai thác Nguồn dữ liệu Thay thế (`https://www.bing.com/rewards/panelflyout`):**
+   - Mặc dù giao diện SSR của Next.js trên `/dashboard` loại bỏ `section#dailyset` đối với nhóm `vsstreak`, endpoint Bing Panelflyout vẫn duy trì đầy đủ dữ liệu hoạt động hàng ngày (`dailySetPromotions`) và tiến trình chuỗi (`streakPromotion` với `activityProgress: 132`).
+   - Extension Background Service Worker tận dụng `host_permissions` sẵn có (`https://www.bing.com/*`) để truy xuất endpoint này với thông tin đăng nhập của phiên duyệt hiện tại.
+2. **Bộ phân tích cú pháp JSON Cân bằng (`extractDailySetFromFlyoutHtml`):**
+   - Triển khai parser trong `reward-dom-helpers.js` sử dụng thuật toán đếm ngoặc cân bằng brace-balanced nhằm bóc tách chính xác khối `window.flyoutViewModel` nằm trong thẻ `<script>` của Bing Flyout, loại bỏ rủi ro sai sót do Regex thông thường.
+   - Trích xuất tự động danh sách thẻ hôm nay (tên thẻ, tiêu đề, mô tả, điểm thưởng, URL đích, ảnh minh họa, trạng thái hoàn thành) và số ngày Streak.
+3. **Bộ khởi tạo DOM React Aria Disclosure (`injectRestoredDailySet`):**
+   - Triển khai trong `reward-scanner-helpers.js` hàm tái tạo `section#dailyset` chuẩn theo ngôn ngữ thiết kế giao diện Microsoft Rewards (React Aria Components):
+     - Tiêu đề "Daily set" kèm huy hiệu nổi bật: `🔥 132 day streak`.
+     - Lưới responsive 3 cột chứa đầy đủ 3 thẻ hoạt động kèm biểu tượng trạng thái hoàn thành hoặc mũi tên điều hướng.
+     - Tự động gắn thẻ trước các section hoạt động khác (`#moreactivities` / `#offers`), giúp người dùng nhìn thấy và tương tác trực quan ngay trên Dashboard.
+4. **Tích hợp Tự động trong Vòng đời Duyệt web & Auto-click:**
+   - Trong `background.js`:
+     - Lắng nghe sự kiện `chrome.tabs.onUpdated`: Bất cứ khi nào trang `/dashboard` tải xong mà thiếu `section#dailyset`, extension tự động fetch dữ liệu và inject `section#dailyset` phục hồi vào trang.
+     - Trong quy trình `autoClickRewards()`: Tự động kiểm tra và phục hồi Daily Set trước khi bắt đầu quét và click thẻ, cho phép extension tự động hoàn thành các nhiệm vụ Daily Set ngay cả trên tài khoản thuộc nhóm thử nghiệm `vsstreak`.
+
+### 2.4. Kiểm thử Tự động & Cô lập Môi trường Màn hình (Xvfb)
+- Toàn bộ quá trình chạy kiểm thử tương tác thực tế với trình duyệt Google Chrome được thực hiện thông qua script cô lập màn hình ảo Xvfb:
+  `/u01/workspace/FacebookBot/scripts/run-with-virtual-display.sh env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus ...`
+- Đảm bảo cửa sổ trình duyệt Headed render trọn vẹn mọi hiệu ứng đồ họa, giải mã cookie an toàn qua DBus Keyring mà hoàn toàn không ảnh hưởng hay bật pop-up lên màn hình làm việc của người dùng.
+- Kết quả kiểm chứng thực tế trên Profile 1:
+  - Khôi phục thành công `section#dailyset` với 3 thẻ: "Tokyo Rực Rỡ Đầu Thu" (+10 pts), "Rạn san hô Cairns mùa xuân trong xanh" (+10 pts), "Ngọn Lửa Sapphic?" (+10 pts).
+  - Khôi phục thành công huy hiệu Streak hiển thị `🔥 132 day streak`.
+  - Cả 3 thẻ đều được kích hoạt click và ghi nhận hoàn thành thành công.
 
 ---
 

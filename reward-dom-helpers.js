@@ -192,10 +192,16 @@ export function isActionableRewardCard(meta) {
   if (!meta.hasVisual) return false;
   if (!text) return false;
   if (!hasValidHref && !meta.isPressable) return false;
-  if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) return false;
+  if (/^(?:https?:\/\/rewards\.bing\.com)?\/(?:earn|about|redeem|refer|status|optout)\/?(?:[?#].*)?$/i.test(href)) return false;
   // Only skip short navigation buttons like "Earn more" or "See more tasks",
   // NOT cards whose longer description happens to contain these phrases.
   if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
+  if (!hasValidHref) {
+    const compactText = text.replace(/\s+/g, " ").trim();
+    if (/^\+?\d+(?:\s*(?:pts?|points?|days?|ngày))?$/i.test(compactText)) return false;
+    if (/^(?:(?:\+?\d[\d,.]*\s+)?bonus|.*streak|level up activities)$/i.test(compactText)) return false;
+    if (/\b\d+\s+days\s+in\s+a\s+row\b/i.test(compactText)) return false;
+  }
 
   return true;
 }
@@ -320,4 +326,91 @@ export function isRewardsPageUrl(url) {
   } catch {
     return false;
   }
+}
+
+export function extractDailySetFromFlyoutHtml(html) {
+  if (!html || typeof html !== "string") return null;
+  const prefix = "window.flyoutViewModel";
+  const startIdx = html.indexOf(prefix);
+  if (startIdx === -1) return null;
+  const eqIdx = html.indexOf("=", startIdx);
+  if (eqIdx === -1) return null;
+  const jsonStart = html.indexOf("{", eqIdx);
+  if (jsonStart === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let vm = null;
+
+  for (let i = jsonStart; i < html.length; i++) {
+    const ch = html[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === '"' && !escape) {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          const jsonStr = html.substring(jsonStart, i + 1);
+          try {
+            vm = JSON.parse(jsonStr);
+          } catch {
+            return null;
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  if (!vm) return null;
+
+  const dsp = vm.flyoutResult?.dailySetPromotions || {};
+  const streakPromo = vm.flyoutResult?.streakPromotion || {};
+  const streakDays =
+    streakPromo.activityProgress ||
+    Number(streakPromo.attributes?.activity_progress || 0);
+
+  const today = new Date();
+  const m = today.getMonth() + 1;
+  const d = today.getDate();
+  const y = today.getFullYear();
+  const todayKey = `${m}/${d}/${y}`;
+
+  let cards = dsp[todayKey];
+  if (!Array.isArray(cards) || cards.length === 0) {
+    const dateKeys = Object.keys(dsp);
+    for (const key of dateKeys) {
+      if (Array.isArray(dsp[key]) && dsp[key].length > 0) {
+        cards = dsp[key];
+        break;
+      }
+    }
+  }
+
+  if (!cards || cards.length === 0) return null;
+
+  return {
+    streakDays,
+    cards: cards.map((c) => ({
+      name: c.name || "",
+      title: c.title || "",
+      description: c.description || "",
+      points: c.pointProgressMax || 10,
+      destinationUrl: c.destinationUrl || "",
+      imageUrl: c.imageUrl || c.smallImageUrl || "",
+      complete: Boolean(c.complete),
+    })),
+  };
 }

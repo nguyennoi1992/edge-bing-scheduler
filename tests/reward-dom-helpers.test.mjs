@@ -5,6 +5,7 @@ import {
   EMPTY_REWARD_STABLE_MS,
   READY_TO_CLAIM_LABEL_RE,
   classifyRewardScanState,
+  extractDailySetFromFlyoutHtml,
   findQuizCompletionPhrase,
   getRewardHydrationRetryDelay,
   isActionableQuestActivity,
@@ -89,6 +90,10 @@ test("reward card filter rejects Earn page navigation URLs", () => {
     "/earn?form=nav",
     "https://rewards.bing.com/earn",
     "https://rewards.bing.com/earn/",
+    "/about",
+    "/redeem",
+    "https://rewards.bing.com/about",
+    "https://rewards.bing.com/redeem?section=shop",
   ]) {
     assert.equal(isActionableRewardCard({ ...base, href }), false, href);
   }
@@ -537,6 +542,30 @@ test("isActionableRewardCard rejects placeholder hrefs when not pressable", () =
   );
 });
 
+test("isActionableRewardCard rejects bare numbers and streak milestones without href", () => {
+  const base = {
+    hasVisual: true,
+    isDisabled: false,
+    isCompleted: false,
+    isVisible: true,
+    isInNav: false,
+    isQuestCard: false,
+    isHeader: false,
+    isPressable: true,
+    href: "",
+  };
+
+  for (const text of [
+    "3", "100", "120", "+15", "50", "15 pts", "7 days", "14 ngày",
+    "1,000 bonus", "bing search streak", "daily set streak", "edge browsing streak", "bing app streak", "level up activities", "Complete the Daily Set for 7 days in a row"
+  ]) {
+    assert.equal(isActionableRewardCard({ ...base, text }), false, text);
+  }
+
+  // But keep claim button without href
+  assert.equal(isActionableRewardCard({ ...base, text: "Ready to claim 6 Claim" }), true);
+});
+
 test("isCardCompleted correctly identifies completed cards via SVG badges, mee-icon, and text", () => {
   const BADGE_SELECTOR = "[class*='statusSuccess'], [class*='Success'], [class*='CheckMark'], [class*='checkMark']";
 
@@ -771,3 +800,65 @@ test("isCardCompleted correctly identifies completed cards via SVG badges, mee-i
   assert.equal(isCardCompleted(null), false, "null card");
   assert.equal(isCardCompleted(undefined), false, "undefined card");
 });
+
+test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak counter", () => {
+  const sampleFlyoutHtml = `
+    <!DOCTYPE html><html><body>
+    <script>
+    (function () {
+        window.flyoutViewModel = {
+          "userInfo": { "isRewardsUser": true, "balance": 3030 },
+          "flyoutResult": {
+            "dailySetPromotions": {
+              "10/20/2026": [
+                {
+                  "name": "Global_DailySet_20261020_Child1",
+                  "title": "Tokyo Rực Rỡ Đầu Thu",
+                  "description": "Hương vị theo mùa & khu vườn",
+                  "pointProgressMax": 10,
+                  "pointProgress": 0,
+                  "complete": false,
+                  "destinationUrl": "https://www.bing.com/search?q=Tokyo",
+                  "imageUrl": "https://bing.com/img1.png"
+                },
+                {
+                  "name": "Global_DailySet_20261020_Child2",
+                  "title": "Cairns Reef Springtime",
+                  "description": "Lặn biển",
+                  "pointProgressMax": 10,
+                  "pointProgress": 10,
+                  "complete": true,
+                  "destinationUrl": "https://www.bing.com/search?q=Cairns",
+                  "imageUrl": "https://bing.com/img2.png"
+                }
+              ]
+            },
+            "streakPromotion": {
+              "activityProgress": 132,
+              "attributes": {
+                "activity_progress": "132"
+              }
+            }
+          }
+        };
+    })();
+    </script>
+    </body></html>
+  `;
+
+  const parsed = extractDailySetFromFlyoutHtml(sampleFlyoutHtml);
+  assert.ok(parsed, "should return parsed object");
+  assert.equal(parsed.streakDays, 132);
+  assert.equal(parsed.cards.length, 2);
+  assert.equal(parsed.cards[0].title, "Tokyo Rực Rỡ Đầu Thu");
+  assert.equal(parsed.cards[0].points, 10);
+  assert.equal(parsed.cards[0].complete, false);
+  assert.equal(parsed.cards[0].destinationUrl, "https://www.bing.com/search?q=Tokyo");
+  assert.equal(parsed.cards[1].complete, true);
+
+  // Safety checks
+  assert.equal(extractDailySetFromFlyoutHtml(null), null);
+  assert.equal(extractDailySetFromFlyoutHtml(""), null);
+  assert.equal(extractDailySetFromFlyoutHtml("<html>no flyout data</html>"), null);
+});
+

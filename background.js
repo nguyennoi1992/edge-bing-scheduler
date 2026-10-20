@@ -7,6 +7,7 @@ import {
   buildQuestCardKey,
   buildRewardCardKey,
   classifyRewardScanState,
+  extractDailySetFromFlyoutHtml,
   getRewardHydrationRetryDelay,
   isActionableQuestActivity,
   isActionableRewardCard,
@@ -605,10 +606,16 @@ async function injectDomHelpers(tabId) {
         if (!text) return false;
         if (!hasValidHref && !meta.isPressable) return false;
         if (meta.isHeader) return false;
-        if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) return false;
+        if (/^(?:https?:\/\/rewards\.bing\.com)?\/(?:earn|about|redeem|refer|status|optout)\/?(?:[?#].*)?$/i.test(href)) return false;
         // Only skip short navigation buttons like "Earn more" or "See more tasks",
         // NOT cards whose longer description happens to contain these phrases.
         if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
+        if (!hasValidHref) {
+          const compactText = text.replace(/\s+/g, " ").trim();
+          if (/^\+?\d+(?:\s*(?:pts?|points?|days?|ngày))?$/i.test(compactText)) return false;
+          if (/^(?:(?:\+?\d[\d,.]*\s+)?bonus|.*streak|level up activities)$/i.test(compactText)) return false;
+          if (/\b\d+\s+days\s+in\s+a\s+row\b/i.test(compactText)) return false;
+        }
 
         return true;
       };
@@ -677,6 +684,38 @@ async function injectDomHelpers(tabId) {
     },
   });
 }
+
+async function fetchAndRestoreDailySet(tabId) {
+  try {
+    const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+      credentials: "include",
+    });
+    if (!flyoutRes.ok) return null;
+    const flyoutHtml = await flyoutRes.text();
+    const dailySetData = extractDailySetFromFlyoutHtml(flyoutHtml);
+    if (dailySetData && dailySetData.cards.length > 0) {
+      console.log(
+        `[Rewards] Restoring daily set: ${dailySetData.cards.length} cards, streak: ${dailySetData.streakDays} days`,
+      );
+      await injectDomHelpers(tabId);
+      await executeRewardsScript(tabId, {
+        args: [dailySetData],
+        func: (data) => {
+          if (typeof window.injectRestoredDailySet === "function") {
+            return window.injectRestoredDailySet(data);
+          }
+          return false;
+        },
+      });
+      return dailySetData;
+    }
+  } catch (err) {
+    console.warn("[Rewards] fetchAndRestoreDailySet failed:", err);
+  }
+  return null;
+}
+globalThis.fetchAndRestoreDailySet = fetchAndRestoreDailySet;
+globalThis.extractDailySetFromFlyoutHtml = extractDailySetFromFlyoutHtml;
 
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
@@ -3795,9 +3834,20 @@ async function autoClickRewards() {
       // unrelated links (redeem, shop, etc.) that aren't reward cards.
       let targetSectionIds = rewardSectionIds;
       if (/rewards\.bing\.com\/earn/i.test(url)) {
-        targetSectionIds = ["moreactivities"];
+        targetSectionIds = ["moreactivities", "exploreonbing"];
       } else if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        targetSectionIds = ["dailyset", "moreactivities"];
+        targetSectionIds = ["dailyset", "moreactivities", "offers"];
+        try {
+          const hasDailySetCards = await executeRewardsScript(tab.id, {
+            func: () => Boolean(document.getElementById("dailyset")?.querySelector("a[href]")),
+          });
+          if (!hasDailySetCards) {
+            console.log("[Rewards] Missing daily set on dashboard, fetching from panelflyout fallback...");
+            await fetchAndRestoreDailySet(tab.id);
+          }
+        } catch (dsErr) {
+          console.warn("[Rewards] Daily set check/restore error:", dsErr);
+        }
       }
 
       // Re-scan after every click. Hydration retries are independent from the
@@ -3942,7 +3992,7 @@ async function autoClickRewards() {
             scanSections.length > 0 &&
             scanSections
               .filter(isRelevantScanSection)
-              .every((s) => !s.exists || s.hydrated === true);
+              .every((s) => !s.exists || s.hydrated === true || (s.directRoundedAnchors === 0 && s.completed === 0 && s.accepted === 0));
           if (
             lastScanSummary &&
             allRelevantHydrated &&
@@ -4320,6 +4370,7 @@ async function autoClickRewards() {
   }
   return rewardOutcomes;
 }
+globalThis.autoClickRewards = autoClickRewards;
 // ---------------- Bing search logic ----------------
 async function typeInBing(query, perCharDelayMs = 80) {
   console.log("[Search-Debug] typeInBing: Starting typing simulation for query: " + query);
@@ -5030,7 +5081,27 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && tab?.url && /rewards\.bing\.com\/dashboard/i.test(tab.url)) {
+    try {
+      await injectDomHelpers(tabId);
+      const hasDailySetCards = await executeRewardsScript(tabId, {
+        func: () => Boolean(document.getElementById("dailyset")?.querySelector("a[href]")),
+      });
+      if (!hasDailySetCards) {
+        await fetchAndRestoreDailySet(tabId);
+      }
+    } catch {}
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "RUN_REWARDS") {
+    autoClickRewards()
+      .then((outcomes) => sendResponse?.({ ok: true, outcomes }))
+      .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
+    return true;
+  }
   if (msg.type === "RESCHEDULE") {
     scheduleAlarm({ clearDelayed: true })
       .then(() => sendResponse?.({ ok: true }))
