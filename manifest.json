@@ -24,6 +24,13 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://rewards.bing.com/*"],
+      "js": ["reward-scanner-helpers.js"],
+      "run_at": "document_end"
+    }
+  ],
   "action": {
     "default_title": "Bing Scheduler",
     "default_popup": "popup.html"

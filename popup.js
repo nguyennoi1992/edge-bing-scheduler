@@ -208,6 +208,11 @@ document.getElementById("runNow").addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "RUN_NOW" });
 });
 
+document.getElementById("reloadExt")?.addEventListener("click", () => {
+  chrome.runtime.reload();
+  window.close();
+});
+
 document.getElementById("refreshLogs").addEventListener("click", () => {
   loadLogs();
 });

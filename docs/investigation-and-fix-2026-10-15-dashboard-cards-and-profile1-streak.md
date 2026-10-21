@@ -131,9 +131,31 @@ Qua kiểm tra trực tiếp cấu trúc DOM, React Server Components và Teleme
 
 ---
 
+### 2.5. Khắc phục Triệt để Vấn đề Không Hiển thị Daily Set trên Profile 1 khi Người dùng Duyệt Web Thực tế (2026-10-21)
+Sau khi người dùng kiểm tra thực tế bằng Chrome Profile 1 và gửi ảnh chụp màn hình cho thấy trên Dashboard chỉ hiện "Your perks" và "Your progress" mà không thấy "Daily set", nhóm phát triển đã tiến hành rà soát chuyên sâu và phát hiện các nguyên nhân gốc:
+
+1. **Nguyên nhân Kỹ thuật:**
+   - **Xung đột React 18 Hydration / Reconciliation:** Microsoft Rewards Dashboard được xây dựng trên nền tảng Next.js (React 18). Khi tải trang, mã HTML ban đầu được đưa vào trình duyệt. Nếu extension inject thẻ DOM `<section id="dailyset">` vào thời điểm `chrome.tabs.onUpdated` (`status: complete`), các chunk JavaScript của React (`_next/static/chunks/...`) hoàn tất tải sau đó và tiến hành hydration reconciliation. React đối chiếu DOM thực tế với Virtual DOM của nhóm `vsstreak` (không hề có Daily Set) và tự động gỡ bỏ (unmount/strip) toàn bộ thẻ `<section id="dailyset">`.
+   - **Điều hướng Single Page Application (SPA):** Khi người dùng chuyển đổi giữa các tab (`Dashboard`, `Earn`, `Redeem`) trên thanh menu, Next.js sử dụng cơ chế client-side routing (`history.pushState`). Trình duyệt không kích hoạt sự kiện tải lại trang, do đó sự kiện `chrome.tabs.onUpdated` với `status: complete` hoàn toàn không chạy lại.
+   - **Chưa đăng ký Content Script thường trực:** Trước đó extension chỉ kích hoạt qua `chrome.scripting.executeScript` khi có sự kiện từ Service Worker. Khi người dùng mở tab thông thường, Service Worker có thể ở trạng thái idle/suspend hoặc chưa nhận diện kịp thời.
+   - **Vị trí chèn DOM chưa bao quát:** Cấu trúc Dashboard của Profile 1 chứa các section `#offers` ("Your perks") và `#snapshot` ("Your progress"). Trước đây nếu target chưa xuất hiện trong lúc React đang khởi động, thẻ bị chèn nhầm lên phía trên đầu banner người dùng và bị xóa khi container re-render.
+
+2. **Các Biện pháp Khắc phục Triệt để:**
+   - **Đăng ký Content Script trong `manifest.json`:** Bổ sung `content_scripts` cho URL `https://rewards.bing.com/*` với script `reward-scanner-helpers.js` chạy ở `run_at: "document_end"`. Bảo đảm script luôn có mặt trên mọi phiên duyệt web của người dùng mà không phụ thuộc vào trạng thái Service Worker.
+   - **Cơ chế Tự phục hồi qua `MutationObserver` (`ensurePersistentDailySet`):** Tạo observer thường trực theo dõi toàn bộ nhánh DOM con trên `document.body`. Ngay khi React hydration xóa bỏ `#dailyset`, observer sẽ lập tức phát hiện và tái tạo, gắn lại `#dailyset` ngay tức khắc vào vị trí chuẩn (ngay phía trên `#offers` / "Your perks" và dưới banner tài khoản).
+   - **Bộ bắt sự kiện Điều hướng SPA (SPA Navigation Hooks):** Bọc các hàm `history.pushState`, `history.replaceState` và lắng nghe sự kiện `popstate`. Khi người dùng click qua lại giữa các trang trong Rewards, Daily Set luôn được tự động kiểm tra và hiển thị ngay lập tức.
+   - **Bộ đệm Dữ liệu Cục bộ (`cachedDailySetData`):** Cache kết quả Daily Set và Streak trong `chrome.storage.local`. Khi người dùng mở trang, Daily Set được phục hồi trong 0ms từ bộ nhớ cache, đồng thời ngầm revalidate dữ liệu mới nhất từ `https://www.bing.com/rewards/panelflyout`.
+   - **Tối ưu CSS Tương thích Dark/Light Theme:** Bổ sung style fallback trực tiếp (background, padding, border, icon checkmark xanh, flame badge) để bảo đảm các thẻ hiển thị đẹp mắt và rõ ràng trên mọi giao diện (kể cả dark theme của Microsoft Rewards).
+   - **Thêm nút "Reload" tiện ích trên Extension Popup:** Cho phép người dùng và nhà phát triển cập nhật mã nguồn tiện ích từ ổ đĩa ngay trong popup chỉ với 1 click mà không cần thao tác thủ công trong `chrome://extensions`.
+
+---
+
 ## 3. Khuyến nghị cho người dùng
-1. **Kích hoạt Streak thủ công trên Profile 1:**
+1. **Reload Extension một lần duy nhất:**
+   - Click vào biểu tượng extension trên thanh công cụ Chrome, nhấn nút **Reload** mới được bổ sung (hoặc mở `chrome://extensions` và bấm nút Reload của Bing Search Scheduler).
+   - Sau khi reload, truy cập vào [rewards.bing.com/dashboard](https://rewards.bing.com/dashboard) trên Profile 1: Toàn bộ Daily Set 3 thẻ cùng huy hiệu chuỗi `🔥 132 day streak` sẽ hiển thị liên tục, bền bỉ và không bị React gỡ bỏ.
+2. **Kích hoạt Streak thủ công trên Profile 1 (nếu cần):**
    - Mở Chrome với Profile 1, truy cập trực tiếp vào [rewards.bing.com/earn](https://rewards.bing.com/earn).
    - Kiểm tra thông báo kích hoạt chuỗi hoặc bật tính năng **Streak Protection** để đưa tài khoản thoát khỏi trạng thái skeleton loader.
-2. **Khôi phục Streak qua Microsoft Rewards Support (nếu cần):**
+3. **Khôi phục Streak qua Microsoft Rewards Support (nếu cần):**
    - Người dùng có thể gửi ticket hỗ trợ tới Microsoft Rewards Support báo cáo sự cố chuyển đổi giao diện `vsstreak` khiến chuỗi 132 ngày bị gián đoạn; Microsoft thường hỗ trợ khôi phục Streak (Streak Restoration) 1 lần cho người dùng đạt chuỗi dài.

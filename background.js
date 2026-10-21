@@ -687,12 +687,22 @@ async function injectDomHelpers(tabId) {
 
 async function fetchAndRestoreDailySet(tabId) {
   try {
-    const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
-      credentials: "include",
-    });
-    if (!flyoutRes.ok) return null;
-    const flyoutHtml = await flyoutRes.text();
-    const dailySetData = extractDailySetFromFlyoutHtml(flyoutHtml);
+    const cached = await chrome.storage.local.get("cachedDailySetData");
+    let dailySetData = cached?.cachedDailySetData;
+
+    if (!dailySetData || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
+      const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+        credentials: "include",
+      });
+      if (flyoutRes.ok) {
+        const flyoutHtml = await flyoutRes.text();
+        dailySetData = extractDailySetFromFlyoutHtml(flyoutHtml);
+        if (dailySetData && dailySetData.cards.length > 0) {
+          await chrome.storage.local.set({ cachedDailySetData: dailySetData });
+        }
+      }
+    }
+
     if (dailySetData && dailySetData.cards.length > 0) {
       console.log(
         `[Rewards] Restoring daily set: ${dailySetData.cards.length} cards, streak: ${dailySetData.streakDays} days`,
@@ -701,12 +711,36 @@ async function fetchAndRestoreDailySet(tabId) {
       await executeRewardsScript(tabId, {
         args: [dailySetData],
         func: (data) => {
+          if (typeof window.ensurePersistentDailySet === "function") {
+            return window.ensurePersistentDailySet(data);
+          }
           if (typeof window.injectRestoredDailySet === "function") {
             return window.injectRestoredDailySet(data);
           }
           return false;
         },
       });
+
+      // Background revalidation to keep data fresh without blocking UI
+      fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" })
+        .then((r) => (r.ok ? r.text() : ""))
+        .then((html) => {
+          if (!html) return;
+          const freshData = extractDailySetFromFlyoutHtml(html);
+          if (freshData && freshData.cards.length > 0) {
+            chrome.storage.local.set({ cachedDailySetData: freshData });
+            executeRewardsScript(tabId, {
+              args: [freshData],
+              func: (data) => {
+                if (typeof window.ensurePersistentDailySet === "function") {
+                  window.ensurePersistentDailySet(data);
+                }
+              },
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+
       return dailySetData;
     }
   } catch (err) {
@@ -5082,20 +5116,41 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status === "complete" && tab?.url && /rewards\.bing\.com\/dashboard/i.test(tab.url)) {
-    try {
-      await injectDomHelpers(tabId);
-      const hasDailySetCards = await executeRewardsScript(tabId, {
-        func: () => Boolean(document.getElementById("dailyset")?.querySelector("a[href]")),
-      });
-      if (!hasDailySetCards) {
-        await fetchAndRestoreDailySet(tabId);
-      }
-    } catch {}
+  const url = tab?.url || changeInfo?.url;
+  if (!url || !/rewards\.bing\.com\/dashboard/i.test(url)) return;
+
+  try {
+    await fetchAndRestoreDailySet(tabId);
+  } catch (err) {
+    console.warn("[Rewards] tabs.onUpdated daily set restore error:", err);
   }
 });
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "GET_RESTORED_DAILY_SET") {
+    (async () => {
+      try {
+        const cached = await chrome.storage.local.get("cachedDailySetData");
+        let data = cached?.cachedDailySetData;
+        if (!data || !Array.isArray(data.cards) || data.cards.length === 0) {
+          const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+            credentials: "include",
+          });
+          if (flyoutRes.ok) {
+            const html = await flyoutRes.text();
+            data = extractDailySetFromFlyoutHtml(html);
+            if (data && data.cards.length > 0) {
+              await chrome.storage.local.set({ cachedDailySetData: data });
+            }
+          }
+        }
+        sendResponse({ ok: true, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
   if (msg.type === "RUN_REWARDS") {
     autoClickRewards()
       .then((outcomes) => sendResponse?.({ ok: true, outcomes }))

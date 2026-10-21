@@ -159,7 +159,7 @@
       isCardCompleted,
     } from "./reward-browser-test-helpers.js";
 
-    await finishBrowserTest("dashboard live HTML card scanning", () => {
+    await finishBrowserTest("dashboard live HTML card scanning", async () => {
       const eventsCard = document.querySelector("[data-testid='card-events']");
       assert(eventsCard !== null, "events card should exist");
       assert(!isCardCompleted(eventsCard), "events card initially not completed");
@@ -223,6 +223,38 @@
 
       const dailyAfterExpand = collectActionableRewardCards(dailysetSec).cards;
       assertEqual(dailyAfterExpand.length, 3, "all 3 daily-set cards should be actionable after expandRewardSection");
+
+      // Test injectRestoredDailySet and ensurePersistentDailySet
+      assert(typeof globalThis.injectRestoredDailySet === "function", "injectRestoredDailySet should exist");
+      assert(typeof globalThis.ensurePersistentDailySet === "function", "ensurePersistentDailySet should exist");
+
+      // Remove existing #dailyset to test restoration
+      dailysetSec.remove();
+      assert(document.getElementById("dailyset") === null, "dailyset should be removed");
+
+      // Inject restored daily set
+      const mockData = {
+        streakDays: 132,
+        cards: [
+          { name: "C1", title: "Test 1", description: "Desc 1", points: 10, complete: false, destinationUrl: "https://www.bing.com/search?q=1", imageUrl: "" },
+          { name: "C2", title: "Test 2", description: "Desc 2", points: 10, complete: true, destinationUrl: "https://www.bing.com/search?q=2", imageUrl: "" }
+        ]
+      };
+      globalThis.ensurePersistentDailySet(mockData);
+
+      const restored = document.getElementById("dailyset");
+      assert(restored !== null, "dailyset should be restored");
+      assertEqual(restored.querySelectorAll("a[href]").length, 2, "2 cards should be rendered");
+      assert(restored.innerText.includes("132 day streak"), "streak flame badge should be present");
+
+      // Test React hydration removal & auto-recovery via MutationObserver
+      restored.remove();
+      assert(document.getElementById("dailyset") === null, "dailyset temporarily removed");
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const recovered = document.getElementById("dailyset");
+      assert(recovered !== null, "dailyset should be automatically re-mounted by MutationObserver");
+      assertEqual(recovered.querySelectorAll("a[href]").length, 2, "recovered dailyset should contain 2 cards");
     });
   </script>
 </body>
