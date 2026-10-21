@@ -200,3 +200,55 @@ Nhóm đã sử dụng `gemini2api` với mô hình `gemini-4-argon` để rà s
    - Kiểm tra thông báo kích hoạt chuỗi hoặc bật tính năng **Streak Protection** để đưa tài khoản thoát khỏi trạng thái skeleton loader.
 3. **Khôi phục Streak qua Microsoft Rewards Support (nếu cần):**
    - Người dùng có thể gửi ticket hỗ trợ tới Microsoft Rewards Support báo cáo sự cố chuyển đổi giao diện `vsstreak` khiến chuỗi 132 ngày bị gián đoạn; Microsoft thường hỗ trợ khôi phục Streak (Streak Restoration) 1 lần cho người dùng đạt chuỗi dài.
+
+---
+
+## 4. Tự động hóa Claim Points ("Ready to claim") & Tối ưu hóa chu trình tìm kiếm (Cập nhật 2026-10-21)
+
+### 4.1. Nguyên nhân gốc rễ sự cố "Ready to claim" không được nhận điểm
+1. **Lỗi nhận diện False-Positive (Premature Claim Termination):**
+   - Trước đây, `findDialogClaimButton()` khi chưa thấy `role="dialog"` đã fallback tìm kiếm trên toàn bộ `document.body` với regex `\bclaim\b`.
+   - Nút của widget "Ready to claim" ở góc phải dashboard có chứa nhãn con `<p class="text-metadata">Claim</p>`.
+   - Khi đó, `findDialogClaimButton()` nhầm lẫn chính thẻ dashboard ban đầu là nút "Claim points" bên trong flyout dialog, click lại thẻ này và ngay lập tức báo thành công (`claimedPoints: 3`), sau đó kích hoạt `chrome.tabs.reload()`.
+   - Hậu quả: Flyout dialog nhận điểm thực sự chưa kịp hiển thị hoặc chưa kịp được click, tab bị reload và điểm thưởng (`3*` kèm chấm đỏ) vẫn còn nguyên chưa được nhận trên cả 2 profile.
+2. **Thiếu checkpoint nhận điểm sau khi hoàn thành thẻ và tìm kiếm:**
+   - Điểm "Ready to claim" chỉ phát sinh **sau khi** người dùng hoàn thành các thẻ Daily Set hoặc thực hiện các lượt tìm kiếm Bing.
+   - Hàm `claimReadyPoints` ban đầu chỉ được gọi 1 lần duy nhất ngay khi vừa mở URL trước cả khi DOM React hydrate, hoàn toàn không được gọi lại sau khi click xong các thẻ hoặc sau khi hoàn tất lượt tìm kiếm. Khi tất cả thẻ hoàn thành (`stable_empty`), extension lập tức đóng tab.
+
+### 4.2. Giải pháp khắc phục triệt để
+1. **Chuẩn hóa bộ lọc nút Claim trong Flyout dialog:**
+   - `findDialogClaimButton(readyCardInfo)` bắt buộc chỉ tìm kiếm bên trong các container hội thoại thực sự (`role="dialog"`, `dialog`, `shadow-shadowFlyout`, `bg-flyout`, `aria-modal="true"`, `h2[slot="title"]`).
+   - Loại trừ dứt điểm thẻ ban đầu và toàn bộ container của nó (`readyCardInfo.cardButton` và `readyCardInfo.cardContainer`).
+   - Sử dụng regex chính xác `/claim points|nhận điểm|.../i` (loại bỏ `\bclaim\b` đơn độc để không bị khớp nhầm nhãn "Claim >").
+   - Cơ chế tự phục hồi: Nếu flyout chưa mở sau mỗi 3 chu kỳ poll, tự động click lại thẻ card với chuỗi sự kiện đầy đủ (`pointerover` -> `pointerdown` -> `mousedown` -> `click` -> `dispatchRewardPress`).
+2. **Bố trí các checkpoint nhận điểm đa tầng:**
+   - **Checkpoint 1:** Sau khi DOM hydrate (`scanCount === 1` sau `waitForRewardsDomReady`).
+   - **Checkpoint 2:** Khi quét thấy trạng thái `stable_empty` (tất cả thẻ đã xong).
+   - **Checkpoint 3:** Khi kết thúc vòng lặp thẻ trước khi chuẩn bị đóng tab dashboard.
+   - **Checkpoint 4:** Sau giai đoạn tìm kiếm Bing (Search phase) ở pass 2 của `autoClickRewards()`.
+3. **Giảm số lượt tìm kiếm mặc định xuống 4 lần (phạm vi 3-5):**
+   - Đã cập nhật giá trị mặc định `searchesPerRun = 4` trong `background.js`, `options.js`, và `options.html`.
+   - Bổ sung logic di trú cấu hình trong `chrome.runtime.onInstalled`: tự động cập nhật các profile đang lưu giá trị mặc định cũ (50 hoặc 10) về 4.
+
+### 4.3. Hoàn thiện click thẻ Daily Set phục hồi trên Profile 1
+1. **Cập nhật trạng thái hoàn thành lạc quan (`markRestoredCardCompleted`):**
+   - Khi một tab con của thẻ Daily Set phục hồi đóng lại thành công, DOM `#ext-restored-dailyset` được gắn ngay thuộc tính `data-ext-completed="true"` và chèn huy hiệu dấu tích xanh `mee-icon-CheckMark`.
+   - `reward-dom-helpers.js` (`isCardCompleted`) nhận diện `data-ext-completed="true"` để không click lặp lại thẻ đã xong.
+2. **Cơ chế so khớp chữ ký thẻ (`data-cards-sig`):**
+   - `injectRestoredDailySet` và `ensurePersistentDailySet` quản lý chữ ký `name:complete:streak` để chỉ re-render khi trạng thái thực sự thay đổi, chống giật DOM và chống xung đột với Next.js router.
+3. **Giới hạn số vòng lặp trả lời quiz:**
+   - Giảm số chu kỳ quiz từ 20 xuống tối đa 12 (giới hạn tối đa 8 clicks, 1500ms delay, ưu tiên các phương án chưa click) giúp thẻ quiz hoàn thành trong dưới 10 giây, loại bỏ hoàn toàn nguy cơ chạm ngưỡng timeout 240s.
+
+---
+
+## 5. Đánh giá kiến trúc với Gemini 4 Argon & Kết quả kiểm thử
+
+### 5.1. Kết quả review từ Gemini 4 Argon (gemini2api)
+- **Xác nhận sửa lỗi False-Positive:** Gemini 4 Argon đánh giá việc loại trừ `readyCardInfo.cardContainer` và thu hẹp phạm vi tìm kiếm nút claim trong dialog là giải pháp dứt điểm, ngăn chặn việc click nhầm footer card.
+- **Tương thích tuyệt đối 2 Profile:** Bộ lọc `if (document.getElementById("dailyset")) return false;` đảm bảo Profile Default hoàn toàn sử dụng mã nguồn React gốc của Microsoft, không bị can thiệp DOM hay rò rỉ bộ nhớ; trong khi Profile 1 được phục hồi Daily Set và huy hiệu chuỗi một cách bền vững.
+- **Deep Event Simulation:** Chuỗi mô phỏng sự kiện chuột/pointer 11 bước trong `clickElement` và `dispatchRewardPress` tương thích hoàn hảo với React-Aria synthetic event listeners.
+
+### 5.2. Kết quả kiểm thử tự động
+- **Node.js test suite:** 24/24 unit tests vượt qua thành công (100% pass).
+- **Edge / Chrome Browser tests:** Toàn bộ test hydrate, live HTML card scanning và extension smoke test đều đạt chuẩn PASS.
+- **Syntax & Manifest check:** Đạt chuẩn hợp lệ không có bất kỳ lỗi cú pháp nào.

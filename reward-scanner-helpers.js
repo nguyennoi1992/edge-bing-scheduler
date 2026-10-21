@@ -131,7 +131,28 @@
     }
   };
 
-  global.injectRestoredDailySet = function injectRestoredDailySet(dailySetData) {
+  global.markRestoredCardCompleted = function markRestoredCardCompleted(targetKey) {
+    if (!targetKey) return false;
+    const section = document.getElementById("ext-restored-dailyset");
+    if (!section) return false;
+    const cards = section.querySelectorAll("a[data-reward-card-name], a[href]");
+    let marked = false;
+    for (const card of cards) {
+      const href = card.getAttribute("href") || "";
+      const name = card.getAttribute("data-reward-card-name") || "";
+      if ((name && targetKey.includes(name)) || (href && targetKey.includes(href))) {
+        card.setAttribute("data-ext-completed", "true");
+        const iconWrap = card.querySelector(".flex.grow.items-center.justify-end");
+        if (iconWrap && !iconWrap.querySelector("svg.mee-icon-CheckMark")) {
+          iconWrap.innerHTML = `<div class="flex size-5 shrink-0 items-center justify-center rounded-full bg-statusSuccessRest text-fgOnStatusSuccess" style="background-color:#107c41;color:#fff;"><svg class="size-3.5 text-statusSuccessTintFg mee-icon-CheckMark" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></div>`;
+        }
+        marked = true;
+      }
+    }
+    return marked;
+  };
+
+  global.injectRestoredDailySet = function injectRestoredDailySet(dailySetData, forceRender = false) {
     if (!dailySetData || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) return false;
 
     // SAFETY: If the native React dailyset exists, abort immediately to protect Profile Default.
@@ -176,17 +197,21 @@
       target.parentNode.insertBefore(section, target);
     }
 
-    if (needsRender || !section.hasChildNodes()) {
-      const streakDays = dailySetData.streakDays || 0;
+    const streakDays = dailySetData.streakDays || 0;
+    const currentSig = section.getAttribute("data-cards-sig");
+    const newSig = dailySetData.cards.map((c) => `${c.name || c.destinationUrl}:${c.complete ? 1 : 0}`).join(";") + `:${streakDays}`;
+
+    if (forceRender || needsRender || !section.hasChildNodes() || currentSig !== newSig) {
+      section.setAttribute("data-cards-sig", newSig);
       const cardsHtml = dailySetData.cards
         .map((card) => {
           const isDone = Boolean(card.complete);
           const checkBadge = isDone
-            ? `<div class="flex size-5 shrink-0 items-center justify-center rounded-full bg-statusSuccessRest text-fgOnStatusSuccess" style="background-color:#107c41;color:#fff;"><svg class="size-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></div>`
+            ? `<div class="flex size-5 shrink-0 items-center justify-center rounded-full bg-statusSuccessRest text-fgOnStatusSuccess" style="background-color:#107c41;color:#fff;"><svg class="size-3.5 text-statusSuccessTintFg mee-icon-CheckMark" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></div>`
             : `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="size-4 shrink-0 text-fgCtrlNeutralSecondaryRest" style="width:16px;height:16px;"><path fill="currentColor" d="M6.25 4.5A1.75 1.75 0 0 0 4.5 6.25v11.5c0 .966.783 1.75 1.75 1.75h11.5a1.75 1.75 0 0 0 1.75-1.75v-4a.75.75 0 0 1 1.5 0v4A3.25 3.25 0 0 1 17.75 21H6.25A3.25 3.25 0 0 1 3 17.75V6.25A3.25 3.25 0 0 1 6.25 3h4a.75.75 0 0 1 0 1.5zM13 3.75a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0V5.56l-5.22 5.22a.75.75 0 0 1-1.06-1.06l5.22-5.22h-4.69a.75.75 0 0 1-.75-.75"></path></svg>`;
 
           return `
-          <a class="group/ctrl cursor-pointer data-disabled:cursor-default outline-0 outline-ctrlFocusOuterStroke focus-visible:outline-ctrlFocusOuterStrokeWidth rounded-cornerCardDefault" data-rac="" href="${card.destinationUrl}" target="_blank" rel="noopener noreferrer" tabindex="0" data-react-aria-pressable="true" data-reward-card-name="${card.name || ""}">
+          <a class="group/ctrl cursor-pointer data-disabled:cursor-default outline-0 outline-ctrlFocusOuterStroke focus-visible:outline-ctrlFocusOuterStrokeWidth rounded-cornerCardDefault" data-rac="" href="${card.destinationUrl}" target="_blank" rel="noopener noreferrer" tabindex="0" data-react-aria-pressable="true" data-reward-card-name="${card.name || ""}" ${isDone ? 'data-ext-completed="true"' : ""}>
             <div class="flex size-full gap-gapBetweenContentSmall p-paddingCardDefault overflow-hidden rounded-cornerCardDefault bg-bgCardOnPrimaryDefaultRest border border-strokeCardOnPrimaryRest cursor-pointer hover:bg-bgCardOnPrimaryDefaultHover active:bg-bgCardOnPrimaryDefaultPressed hover:[&_img]:scale-110 hover:border-strokeCardOnPrimaryHover active:border-strokeCardOnPrimaryPressed shadow-shadowCardRest hover:shadow-shadowCardHover active:shadow-shadowCardPressed flex-row" style="min-height:92px;">
               <div class="relative shrink-0 overflow-hidden rounded-cornerCardNestedDefaultOutside bg-bgCtrlNeutralDisabled aspect-square h-24.5" style="width:96px;height:96px;">
                 <img alt="${card.title || ""}" class="text-transparent absolute inset-0 h-full w-full object-cover transition-transform duration-200" src="${card.imageUrl || ""}">
@@ -235,7 +260,7 @@
     return true;
   };
 
-  global.ensurePersistentDailySet = function ensurePersistentDailySet(dailySetData) {
+  global.ensurePersistentDailySet = function ensurePersistentDailySet(dailySetData, force = false) {
     if (!dailySetData || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) return false;
     global.__restoredDailySetData = dailySetData;
 
@@ -253,11 +278,14 @@
       }
 
       const current = document.getElementById("ext-restored-dailyset");
-      if (current && current.isConnected && current.querySelector("a[href]")) {
-        return;
+      if (!force && current && current.isConnected && current.querySelector("a[href]")) {
+        const streak = global.__restoredDailySetData.streakDays || 0;
+        const currentSig = current.getAttribute("data-cards-sig");
+        const newSig = global.__restoredDailySetData.cards.map((c) => `${c.name || c.destinationUrl}:${c.complete ? 1 : 0}`).join(";") + `:${streak}`;
+        if (currentSig === newSig) return;
       }
 
-      global.injectRestoredDailySet(global.__restoredDailySetData);
+      global.injectRestoredDailySet(global.__restoredDailySetData, force);
     }
 
     if (document.readyState === "loading") {

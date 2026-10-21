@@ -95,6 +95,8 @@ export function isCompletedQuestText(value) {
 
 export function isCardCompleted(cardEl) {
   if (!cardEl) return false;
+  if (cardEl.getAttribute?.("data-ext-completed") === "true") return true;
+  if (cardEl.querySelector?.("[data-ext-completed='true']")) return true;
   const BADGE_SELECTOR =
     "[class*='statusSuccess'], [class*='Success'], [class*='CheckMark'], [class*='checkMark']";
   const DIRECT_BADGE_SELECTOR =

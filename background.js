@@ -76,7 +76,7 @@ async function ensureTabFocused(tabId) {
 const DEFAULTS = {
   enabled: true,
   time: DEFAULT_RUN_TIME, // 24h HH:MM
-  searchesPerRun: 50, // how many queries to open per run
+  searchesPerRun: 4, // how many queries to open per run (reduced to 4 per user request)
   intervalMin: 10, // min seconds between tabs
   intervalMax: 120, // max seconds between tabs
   customQueriesRaw: "", // newline or comma separated list
@@ -685,14 +685,14 @@ async function injectDomHelpers(tabId) {
   });
 }
 
-async function fetchAndRestoreDailySet(tabId) {
+async function fetchAndRestoreDailySet(tabId, { forceFresh = false } = {}) {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const cached = await chrome.storage.local.get(["cachedDailySetData", "cachedDailySetDate"]);
     let dailySetData = cached?.cachedDailySetData;
     const cachedDate = cached?.cachedDailySetDate;
 
-    if (!dailySetData || cachedDate !== today || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
+    if (forceFresh || !dailySetData || cachedDate !== today || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
       const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
         credentials: "include",
       });
@@ -707,41 +707,43 @@ async function fetchAndRestoreDailySet(tabId) {
 
     if (dailySetData && dailySetData.cards.length > 0) {
       console.log(
-        `[Rewards] Restoring daily set: ${dailySetData.cards.length} cards, streak: ${dailySetData.streakDays} days`,
+        `[Rewards] Restoring daily set: ${dailySetData.cards.length} cards, streak: ${dailySetData.streakDays} days, forceFresh=${forceFresh}`,
       );
       await injectDomHelpers(tabId);
       await executeRewardsScript(tabId, {
-        args: [dailySetData],
-        func: (data) => {
+        args: [dailySetData, forceFresh],
+        func: (data, force) => {
           if (typeof window.ensurePersistentDailySet === "function") {
-            return window.ensurePersistentDailySet(data);
+            return window.ensurePersistentDailySet(data, force);
           }
           if (typeof window.injectRestoredDailySet === "function") {
-            return window.injectRestoredDailySet(data);
+            return window.injectRestoredDailySet(data, force);
           }
           return false;
         },
       });
 
       // Background revalidation to keep data fresh without blocking UI
-      fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" })
-        .then((r) => (r.ok ? r.text() : ""))
-        .then((html) => {
-          if (!html) return;
-          const freshData = extractDailySetFromFlyoutHtml(html);
-          if (freshData && freshData.cards.length > 0) {
-            chrome.storage.local.set({ cachedDailySetData: freshData, cachedDailySetDate: today });
-            executeRewardsScript(tabId, {
-              args: [freshData],
-              func: (data) => {
-                if (typeof window.ensurePersistentDailySet === "function") {
-                  window.ensurePersistentDailySet(data);
-                }
-              },
-            }).catch(() => {});
-          }
-        })
-        .catch(() => {});
+      if (!forceFresh) {
+        fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" })
+          .then((r) => (r.ok ? r.text() : ""))
+          .then((html) => {
+            if (!html) return;
+            const freshData = extractDailySetFromFlyoutHtml(html);
+            if (freshData && freshData.cards.length > 0) {
+              chrome.storage.local.set({ cachedDailySetData: freshData, cachedDailySetDate: today });
+              executeRewardsScript(tabId, {
+                args: [freshData, true],
+                func: (data, force) => {
+                  if (typeof window.ensurePersistentDailySet === "function") {
+                    window.ensurePersistentDailySet(data, force);
+                  }
+                },
+              }).catch(() => {});
+            }
+          })
+          .catch(() => {});
+      }
 
       return dailySetData;
     }
@@ -879,37 +881,51 @@ async function autoClickRewards() {
 
           const findReadyToClaimCard = () => {
             const elements = collectAllElements(document);
-            const labels = elements.filter((el) => {
-              if (!(el instanceof HTMLElement)) return false;
-              if (!isVisible(el)) return false;
-              const matcher = window.READY_TO_CLAIM_LABEL_RE || /^(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?))?[\s!:]*|[\s!:]*)?$/i;
-              return matcher.test(getNodeText(el));
+            const candidates = elements.filter((el) => {
+              if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
+              if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+              const text = getNodeText(el);
+              return /ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению/i.test(text);
             });
 
-            for (const labelEl of labels) {
-              const cardButton = labelEl.closest(
-                "button, [role='button'], a[role='button'], [data-react-aria-pressable='true']",
-              );
-              if (!cardButton || !isVisible(cardButton)) continue;
-              if (cardButton.disabled || cardButton.getAttribute("aria-disabled") === "true") continue;
+            for (const cand of candidates) {
+              const cardContainer =
+                cand.closest(
+                  "button, [role='button'], [data-react-aria-pressable='true'], [class*='card' i], [data-rac], section, div.flex",
+                ) || cand.parentElement;
+              if (!cardContainer || !isVisible(cardContainer)) continue;
 
-              const text = getNodeText(cardButton);
+              const containerText = getNodeText(cardContainer);
               const points = typeof window.parsePointsFromText === "function"
-                ? window.parsePointsFromText(text)
+                ? window.parsePointsFromText(containerText)
                 : 0;
 
-              if (points > 0) {
-                return { cardButton, points };
+              const hasClaimablePoints =
+                points > 0 ||
+                (/\b\d+\b/.test(containerText) && /claim|nhận|reclamar|einlösen/i.test(containerText));
+
+              if (hasClaimablePoints) {
+                const clickable =
+                  cardContainer.querySelector(
+                    "button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]",
+                  ) ||
+                  (cardContainer.matches?.("button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]")
+                    ? cardContainer
+                    : cand);
+
+                return {
+                  cardButton: clickable,
+                  cardContainer,
+                  points: points || 1,
+                };
               }
             }
 
             return null;
           };
 
-          const findDialogClaimButton = () => {
-            const CLAIM_TEXT_RE =
-              /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^получить баллы$/i;
-            const CLAIM_MATCH_RE =
+          const findDialogClaimButton = (readyCardInfo) => {
+            const CLAIM_POINTS_RE =
               /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
 
             const dialogs = collectAllElements(document).filter((el) => {
@@ -921,21 +937,23 @@ async function autoClickRewards() {
                 el.tagName.toLowerCase() === "dialog" ||
                 el.classList?.contains("shadow-shadowFlyout") ||
                 el.classList?.contains("bg-flyout") ||
-                el.getAttribute("aria-modal") === "true"
+                el.getAttribute("aria-modal") === "true" ||
+                (el.getAttribute("data-rac") !== null && /flyout|dialog|react-aria/i.test(el.className || "")) ||
+                Boolean(el.querySelector?.("h2[slot='title'], [slot='title']"))
               );
             });
 
             if (!dialogs.length) return null;
-            const topDialogs = dialogs.filter((d) => !dialogs.some((other) => other !== d && other.contains(d)));
 
-            for (const scope of topDialogs) {
+            for (const scope of dialogs) {
               // 1. Search for an element with text matching "Claim points" inside or on a button
               const candidateLabels = Array.from(
                 scope.querySelectorAll("button, [role='button'], [data-react-aria-pressable='true'], span, div, p, strong, b"),
               ).filter((el) => {
                 if (!(el instanceof HTMLElement)) return false;
                 if (!isVisible(el)) return false;
-                return CLAIM_TEXT_RE.test(getNodeText(el));
+                const text = getNodeText(el);
+                return CLAIM_POINTS_RE.test(text) && !/ready to claim|sẵn sàng nhận/i.test(text);
               });
 
               for (const labelEl of candidateLabels) {
@@ -948,12 +966,14 @@ async function autoClickRewards() {
                   !btn.disabled &&
                   btn.getAttribute("aria-disabled") !== "true"
                 ) {
+                  if (readyCardInfo && (btn === readyCardInfo.cardButton || (readyCardInfo.cardContainer && readyCardInfo.cardContainer.contains(btn)))) {
+                    continue;
+                  }
                   return btn;
                 }
               }
 
               // 2. Fallback: search for buttons whose text contains "claim points"
-              // (e.g. "6 Pending Claim points"), excluding dismiss/close controls
               const button = Array.from(
                 scope.querySelectorAll(
                   "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
@@ -962,12 +982,15 @@ async function autoClickRewards() {
                 if (!(el instanceof HTMLElement)) return false;
                 if (!isVisible(el)) return false;
                 if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+                if (readyCardInfo && (el === readyCardInfo.cardButton || (readyCardInfo.cardContainer && readyCardInfo.cardContainer.contains(el)))) {
+                  return false;
+                }
                 const text = getNodeText(el);
                 if (/^(close|dismiss|how it works|đóng|bỏ qua)$/i.test(text)) return false;
                 const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
                 if (/close|dismiss/i.test(ariaLabel)) return false;
-                if (window.READY_TO_CLAIM_LABEL_RE ? window.READY_TO_CLAIM_LABEL_RE.test(text) : /ready to claim|sẵn sàng nhận|готово к получению|可领取/i.test(text)) return false;
-                return CLAIM_MATCH_RE.test(text);
+                if (window.READY_TO_CLAIM_LABEL_RE ? window.READY_TO_CLAIM_LABEL_RE.test(text) : /ready to claim|sẵn sàng nhận/i.test(text)) return false;
+                return CLAIM_POINTS_RE.test(text);
               });
               if (button) return button;
             }
@@ -984,15 +1007,41 @@ async function autoClickRewards() {
 
           console.log("[Rewards-Debug] claimReadyPoints: Found ready card for " + readyCard.points + " points. Clicking...");
           clickElement(readyCard.cardButton);
+          if (typeof window.dispatchRewardPress === "function") {
+            try { window.dispatchRewardPress(readyCard.cardButton); } catch { }
+          }
+          if (readyCard.cardContainer && readyCard.cardContainer !== readyCard.cardButton) {
+            clickElement(readyCard.cardContainer);
+            const claimTextEl = Array.from(readyCard.cardContainer.querySelectorAll("p, span, div")).find((el) => /claim|nhận/i.test(getNodeText(el)));
+            if (claimTextEl) {
+              clickElement(claimTextEl);
+              if (typeof window.dispatchRewardPress === "function") {
+                try { window.dispatchRewardPress(claimTextEl); } catch { }
+              }
+            }
+          }
 
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             await sleep(pollMs);
-            const claimPointsButton = findDialogClaimButton();
+
+            if (attempt >= 2) {
+              const checkCard = findReadyToClaimCard();
+              if (!checkCard || checkCard.points === 0) {
+                console.log("[Rewards-Debug] claimReadyPoints: Ready card is gone or points 0, claim succeeded directly!");
+                return { clicked: true, claimedPoints: readyCard.points, reason: "claimed_directly" };
+              }
+            }
+
+            const claimPointsButton = findDialogClaimButton(readyCard);
             if (!claimPointsButton) {
               if ((attempt + 1) % 3 === 0) {
                 console.log("[Rewards-Debug] claimReadyPoints: Dialog not opened yet, re-clicking card button...");
                 const currentCard = findReadyToClaimCard();
-                clickElement(currentCard?.cardButton || readyCard.cardButton);
+                const btnToClick = currentCard?.cardButton || readyCard.cardButton;
+                clickElement(btnToClick);
+                if (typeof window.dispatchRewardPress === "function") {
+                  try { window.dispatchRewardPress(btnToClick); } catch { }
+                }
               }
               continue;
             }
@@ -1007,7 +1056,15 @@ async function autoClickRewards() {
               claimPointsButton.closest("dialog, [role='dialog'], [class*='flyout' i], section") ||
               null;
             clickElement(targetEl);
-            await sleep(1500);
+            if (typeof window.dispatchRewardPress === "function") {
+              try { window.dispatchRewardPress(targetEl); } catch { }
+            }
+            try {
+              for (const child of targetEl.querySelectorAll("span, p, div")) {
+                child.click();
+              }
+            } catch { }
+            await sleep(2000);
 
             if (dialogScope) {
               const closeSelectors =
@@ -3354,7 +3411,9 @@ async function autoClickRewards() {
             let lastCandidateSnapshot = [];
             let emptyCandidateRounds = 0;
 
-            for (let attempt = 0; attempt < 20; attempt++) {
+            const clickedElements = new Set();
+            for (let attempt = 0; attempt < 12; attempt++) {
+              if (clicks >= 8) break;
               const completionEvidence = getQuizCompletionEvidence();
               if (completionEvidence) {
                 return {
@@ -3375,31 +3434,23 @@ async function autoClickRewards() {
 
               if (!candidates.length) {
                 emptyCandidateRounds++;
-                if (emptyCandidateRounds >= 5) {
+                if (emptyCandidateRounds >= 3) {
                   break;
                 }
-                await sleep(1500);
+                await sleep(1200);
                 continue;
               }
               emptyCandidateRounds = 0;
 
-              // Avoid clicking the same element repeatedly (stale-click detection)
-              let target = candidates[0];
-              if (target.text === lastClickedText) {
-                sameClickCount++;
-                if (sameClickCount >= 3) {
-                  // Try a different candidate if available
-                  target = candidates.length > 1 ? candidates[1] : candidates[0];
-                  sameClickCount = 0;
-                }
-              } else {
-                sameClickCount = 0;
-              }
-              lastClickedText = target.text;
+              // Prefer unclicked candidates to make steady progress through quiz questions
+              const unclicked = candidates.filter((c) => !clickedElements.has(c.el));
+              let target = unclicked.length > 0 ? unclicked[0] : candidates[0];
+              clickedElements.add(target.el);
 
+              lastClickedText = target.text;
               clickElement(target.el);
               clicks++;
-              await sleep(2500);
+              await sleep(1500);
             }
 
             const completionEvidence = getQuizCompletionEvidence();
@@ -3948,6 +3999,18 @@ async function autoClickRewards() {
         );
         if (timedOut()) return makeIncompleteOutcome("hydration_timeout");
 
+        if (scanCount === 1 && /rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+          try {
+            const initialClaim = await claimReadyPoints(tab.id);
+            if (initialClaim.clicked) {
+              await appendDebugLog("success", "rewards", `Claimed ${initialClaim.claimedPoints} ready point(s) after hydration`, { url });
+              await sleepWithinDeadline(1500);
+            }
+          } catch (e) {
+            console.warn("[Rewards] initial claimReadyPoints failed:", e);
+          }
+        }
+
         const initialStableEmptySince = Number.isFinite(domReadyResult?.stableEmptySince)
           ? domReadyResult.stableEmptySince
           : null;
@@ -4011,6 +4074,17 @@ async function autoClickRewards() {
         }
 
         if (lastHydrationStatus === "stable_empty") {
+          if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+            try {
+              const claimRes = await claimReadyPoints(tab.id);
+              if (claimRes.clicked) {
+                await appendDebugLog("success", "rewards", `Claimed ${claimRes.claimedPoints} ready point(s) on stable empty`, { url });
+                await sleepWithinDeadline(1500);
+              }
+            } catch (e) {
+              console.warn("[Rewards] claimReadyPoints on stable empty failed:", e);
+            }
+          }
           return {
             status: "completed",
             reason: "stable_empty",
@@ -4038,6 +4112,17 @@ async function autoClickRewards() {
             lastScanSummary.completedCount > 0 &&
             lastScanSummary.acceptedCount === 0
           ) {
+            if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+              try {
+                const claimRes = await claimReadyPoints(tab.id);
+                if (claimRes.clicked) {
+                  await appendDebugLog("success", "rewards", `Claimed ${claimRes.claimedPoints} ready point(s) on all cards completed`, { url });
+                  await sleepWithinDeadline(1500);
+                }
+              } catch (e) {
+                console.warn("[Rewards] claimReadyPoints on all cards completed failed:", e);
+              }
+            }
             return {
               status: "completed",
               reason: "stable_empty",
@@ -4235,6 +4320,21 @@ async function autoClickRewards() {
         ]);
 
         const effectiveHref = resultHref || card.href;
+
+        // Optimistically mark restored card completed in DOM if tab was processed
+        if (newTabIds.length > 0 || domChanged || wasClicked) {
+          try {
+            await executeRewardsScript(tab.id, {
+              args: [card.key || effectiveHref || ""],
+              func: (key) => {
+                if (typeof window.markRestoredCardCompleted === "function") {
+                  window.markRestoredCardCompleted(key);
+                }
+              },
+            });
+          } catch { }
+        }
+
         const noEffect = !effectiveHref && newTabIds.length === 0 && !domChanged;
         const evidence = {
           childTab: newTabIds.length > 0,
@@ -4308,6 +4408,11 @@ async function autoClickRewards() {
           return makeIncompleteOutcome("unexpected_redirect");
         }
 
+        if (/rewards\.bing\.com\/dashboard/i.test(url)) {
+          try {
+            await fetchAndRestoreDailySet(tab.id, { forceFresh: true });
+          } catch {}
+        }
         await injectDomHelpers(tab.id);
         await sleepWithinDeadline(1500);
       }
@@ -4334,6 +4439,20 @@ async function autoClickRewards() {
           await closeChildTabs(tab.id, 4, 1200, windowId);
         } else {
           await closeChildTabs(tab.id, 1, 0, windowId);
+        }
+        if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+          try {
+            const claimRes = await claimReadyPoints(tab.id);
+            if (claimRes.clicked) {
+              await appendDebugLog("success", "rewards", `Claimed ${claimRes.claimedPoints} ready point(s) before closing tab`, { url });
+              await sleepWithinDeadline(1500);
+            }
+          } catch {}
+        }
+        if (/rewards\.bing\.com\/dashboard/i.test(url)) {
+          try {
+            await fetchAndRestoreDailySet(tab.id, { forceFresh: true });
+          } catch {}
         }
         try {
           await chrome.tabs.remove(tab.id);
@@ -5182,7 +5301,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const current = await chrome.storage.sync.get(["enabled", "time"]);
+  const current = await chrome.storage.sync.get(["enabled", "time", "searchesPerRun"]);
   const updates = {};
 
   if (current.enabled === undefined) {
@@ -5190,6 +5309,9 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
   if (!current.time || current.time === "08:00") {
     updates.time = DEFAULT_RUN_TIME;
+  }
+  if (current.searchesPerRun === undefined || current.searchesPerRun === 50 || current.searchesPerRun === 10) {
+    updates.searchesPerRun = DEFAULTS.searchesPerRun;
   }
   if (Object.keys(updates).length) {
     await chrome.storage.sync.set(updates);
