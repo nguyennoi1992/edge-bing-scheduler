@@ -687,10 +687,12 @@ async function injectDomHelpers(tabId) {
 
 async function fetchAndRestoreDailySet(tabId) {
   try {
-    const cached = await chrome.storage.local.get("cachedDailySetData");
+    const today = new Date().toISOString().slice(0, 10);
+    const cached = await chrome.storage.local.get(["cachedDailySetData", "cachedDailySetDate"]);
     let dailySetData = cached?.cachedDailySetData;
+    const cachedDate = cached?.cachedDailySetDate;
 
-    if (!dailySetData || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
+    if (!dailySetData || cachedDate !== today || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
       const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
         credentials: "include",
       });
@@ -698,7 +700,7 @@ async function fetchAndRestoreDailySet(tabId) {
         const flyoutHtml = await flyoutRes.text();
         dailySetData = extractDailySetFromFlyoutHtml(flyoutHtml);
         if (dailySetData && dailySetData.cards.length > 0) {
-          await chrome.storage.local.set({ cachedDailySetData: dailySetData });
+          await chrome.storage.local.set({ cachedDailySetData: dailySetData, cachedDailySetDate: today });
         }
       }
     }
@@ -728,7 +730,7 @@ async function fetchAndRestoreDailySet(tabId) {
           if (!html) return;
           const freshData = extractDailySetFromFlyoutHtml(html);
           if (freshData && freshData.cards.length > 0) {
-            chrome.storage.local.set({ cachedDailySetData: freshData });
+            chrome.storage.local.set({ cachedDailySetData: freshData, cachedDailySetDate: today });
             executeRewardsScript(tabId, {
               args: [freshData],
               func: (data) => {
@@ -1421,19 +1423,19 @@ async function autoClickRewards() {
                 .filter((id) => id && id !== "global")
                 .map((id) => document.querySelector(`#${id}`))
                 .filter(Boolean);
-              const dailyset = document.querySelector("#dailyset");
+              const dailyset = document.querySelector("#dailyset") || document.querySelector("#ext-restored-dailyset");
               const sectionCards = sections.reduce((sum, section) => sum + countSectionCards(section), 0);
               const sectionCardShells = sections.reduce((sum, section) => sum + countSectionCardShells(section), 0);
               const fallbackCards =
                 (
-                  (ids.includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                  ((ids.includes("dailyset") || ids.includes("ext-restored-dailyset")) && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
                   (ids.includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href))
                 )
                   ? countFallbackCards()
                   : 0;
               const fallbackCardShells =
                 (
-                  (ids.includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                  ((ids.includes("dailyset") || ids.includes("ext-restored-dailyset")) && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
                   (ids.includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href))
                 )
                   ? countFallbackCardShells()
@@ -2511,7 +2513,7 @@ async function autoClickRewards() {
                   .flat();
                 if (sectionCards.length === 0) {
                   const isDashboardFallback =
-                    (sectionIds || []).includes("dailyset") &&
+                    ((sectionIds || []).includes("dailyset") || (sectionIds || []).includes("ext-restored-dailyset")) &&
                     /rewards\.bing\.com\/dashboard/i.test(location.href);
                   const isEarnFallback =
                     (sectionIds || []).includes("moreactivities") &&
@@ -2967,7 +2969,7 @@ async function autoClickRewards() {
           }
 
           async function tryActivateTarget(card, target) {
-            if (!target || !isVisible(target) || isDisabled(target)) return false;
+            if (!target || (typeof target.isConnected === "boolean" && !target.isConnected) || !isVisible(target) || isDisabled(target)) return false;
 
             const beforeSignature = getCardSignature(card);
             const beforeUrl = location.href;
@@ -3082,7 +3084,7 @@ async function autoClickRewards() {
               .flat();
             if (cardsList.length === 0) {
               const usePageFallback =
-                ((sectionIds || []).includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                (((sectionIds || []).includes("dailyset") || (sectionIds || []).includes("ext-restored-dailyset")) && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
                 ((sectionIds || []).includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href));
               if (usePageFallback) {
                 cardsList.push(...collectPageRewardFallbackCards());
@@ -3870,10 +3872,10 @@ async function autoClickRewards() {
       if (/rewards\.bing\.com\/earn/i.test(url)) {
         targetSectionIds = ["moreactivities", "exploreonbing"];
       } else if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        targetSectionIds = ["dailyset", "moreactivities", "offers"];
+        targetSectionIds = ["dailyset", "ext-restored-dailyset", "moreactivities", "offers"];
         try {
           const hasDailySetCards = await executeRewardsScript(tab.id, {
-            func: () => Boolean(document.getElementById("dailyset")?.querySelector("a[href]")),
+            func: () => Boolean((document.getElementById("dailyset") || document.getElementById("ext-restored-dailyset"))?.querySelector("a[href]")),
           });
           if (!hasDailySetCards) {
             console.log("[Rewards] Missing daily set on dashboard, fetching from panelflyout fallback...");
@@ -3896,7 +3898,7 @@ async function autoClickRewards() {
       const isRelevantScanSection = (section) =>
         targetSectionIds.includes(section.sectionId) ||
         (section.sectionId === "earn_fallback" && targetSectionIds.includes("moreactivities")) ||
-        (section.sectionId === "dashboard_fallback" && targetSectionIds.includes("dailyset"));
+        (section.sectionId === "dashboard_fallback" && (targetSectionIds.includes("dailyset") || targetSectionIds.includes("ext-restored-dailyset")));
       const summarizeScanSections = (sections) => {
         const relevantSections = sections.filter(isRelevantScanSection);
         return {
@@ -5130,9 +5132,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "GET_RESTORED_DAILY_SET") {
     (async () => {
       try {
-        const cached = await chrome.storage.local.get("cachedDailySetData");
+        const today = new Date().toISOString().slice(0, 10);
+        const cached = await chrome.storage.local.get(["cachedDailySetData", "cachedDailySetDate"]);
         let data = cached?.cachedDailySetData;
-        if (!data || !Array.isArray(data.cards) || data.cards.length === 0) {
+        const cachedDate = cached?.cachedDailySetDate;
+        if (!data || cachedDate !== today || !Array.isArray(data.cards) || data.cards.length === 0) {
           const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
             credentials: "include",
           });
@@ -5140,7 +5144,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             const html = await flyoutRes.text();
             data = extractDailySetFromFlyoutHtml(html);
             if (data && data.cards.length > 0) {
-              await chrome.storage.local.set({ cachedDailySetData: data });
+              await chrome.storage.local.set({ cachedDailySetData: data, cachedDailySetDate: today });
             }
           }
         }

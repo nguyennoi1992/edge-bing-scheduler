@@ -219,7 +219,7 @@ export function classifyRewardScanState({
       targetIds.size === 0 ||
       targetIds.has(section.sectionId) ||
       (section.sectionId === "earn_fallback" && targetIds.has("moreactivities")) ||
-      (section.sectionId === "dashboard_fallback" && targetIds.has("dailyset")),
+      (section.sectionId === "dashboard_fallback" && (targetIds.has("dailyset") || targetIds.has("ext-restored-dailyset"))),
   );
   const existingSections = targetSections.filter((section) => section.exists === true);
   const hydrated =

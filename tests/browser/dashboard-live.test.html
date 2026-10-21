@@ -228,11 +228,6 @@
       assert(typeof globalThis.injectRestoredDailySet === "function", "injectRestoredDailySet should exist");
       assert(typeof globalThis.ensurePersistentDailySet === "function", "ensurePersistentDailySet should exist");
 
-      // Remove existing #dailyset to test restoration
-      dailysetSec.remove();
-      assert(document.getElementById("dailyset") === null, "dailyset should be removed");
-
-      // Inject restored daily set
       const mockData = {
         streakDays: 132,
         cards: [
@@ -240,21 +235,32 @@
           { name: "C2", title: "Test 2", description: "Desc 2", points: 10, complete: true, destinationUrl: "https://www.bing.com/search?q=2", imageUrl: "" }
         ]
       };
+
+      // Native dailyset is present (Profile Default scenario): must NOT inject fallback
+      const injectedWithNative = globalThis.injectRestoredDailySet(mockData);
+      assertEqual(injectedWithNative, false, "injectRestoredDailySet must abort when native #dailyset is present");
+      assert(document.getElementById("ext-restored-dailyset") === null, "ext-restored-dailyset must not exist when #dailyset is present");
+
+      // Remove existing #dailyset to test restoration (Profile 1 scenario)
+      dailysetSec.remove();
+      assert(document.getElementById("dailyset") === null, "dailyset should be removed");
+
+      // Inject restored daily set into isolated namespace
       globalThis.ensurePersistentDailySet(mockData);
 
-      const restored = document.getElementById("dailyset");
-      assert(restored !== null, "dailyset should be restored");
+      const restored = document.getElementById("ext-restored-dailyset");
+      assert(restored !== null, "ext-restored-dailyset should be restored");
       assertEqual(restored.querySelectorAll("a[href]").length, 2, "2 cards should be rendered");
       assert(restored.innerText.includes("132 day streak"), "streak flame badge should be present");
 
-      // Test React hydration removal & auto-recovery via MutationObserver
+      // Test React hydration removal & auto-recovery via debounced MutationObserver
       restored.remove();
-      assert(document.getElementById("dailyset") === null, "dailyset temporarily removed");
+      assert(document.getElementById("ext-restored-dailyset") === null, "ext-restored-dailyset temporarily removed");
 
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const recovered = document.getElementById("dailyset");
-      assert(recovered !== null, "dailyset should be automatically re-mounted by MutationObserver");
-      assertEqual(recovered.querySelectorAll("a[href]").length, 2, "recovered dailyset should contain 2 cards");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const recovered = document.getElementById("ext-restored-dailyset");
+      assert(recovered !== null, "ext-restored-dailyset should be automatically re-mounted by MutationObserver");
+      assertEqual(recovered.querySelectorAll("a[href]").length, 2, "recovered ext-restored-dailyset should contain 2 cards");
     });
   </script>
 </body>

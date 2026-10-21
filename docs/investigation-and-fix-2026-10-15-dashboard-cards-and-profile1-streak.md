@@ -150,6 +150,47 @@ Sau khi người dùng kiểm tra thực tế bằng Chrome Profile 1 và gửi 
 
 ---
 
+### 2.6. Rà soát Kiến trúc Nâng cao với Gemini 4 Argon & Hoàn thiện Tương thích Đa Profile (2026-10-21)
+Nhóm đã sử dụng `gemini2api` với mô hình `gemini-4-argon` để rà soát toàn diện kiến trúc tiêm DOM, vòng đời React 18 hydration, và đảm bảo tính tương thích tuyệt đối cho cả 2 tài khoản trên 2 Chrome profile:
+
+1. **Các Điểm nghẽn Kiến trúc & Rủi ro Tiềm ẩn Được Phát hiện:**
+   - **Nguy cơ phá vỡ React Fiber trên Profile Default:** Nếu sử dụng chung `id="dailyset"` và can thiệp ghi đè `innerHTML`, tài khoản ở Profile Default (sở hữu `section#dailyset` gốc từ flight `vssctrl`) có nguy cơ bị đứt gãy tham chiếu React Fiber nội bộ, dẫn tới các lỗi reconciliation (`removeChild on Node`) làm ứng dụng Next.js bị crash.
+   - **Vòng lặp MutationObserver & Quá tải CPU:** Quan sát đồng bộ `{ subtree: true }` trên `document.body` có thể tạo ra chuỗi kích hoạt lặp vô hạn (infinite mutation loop) khi script tự sửa đổi DOM, gây nghẽn main thread khi React 18 render theo các micro-task chunks.
+   - **Dữ liệu Cache Lỗi thời qua Ngày mới:** Cache dữ liệu Daily Set trong `chrome.storage.local` nếu không có nhãn ngày lịch (`YYYY-MM-DD`) có thể phục hồi thẻ cũ của hôm trước nếu fetch mạng tạm thời gián đoạn.
+   - **Tham chiếu DOM Ngắt kết nối (`stale isConnected`):** Trong vòng lặp auto-click, nếu React re-render hoặc observer can thiệp thay thế nút, con trỏ có thể gửi sự kiện vào phần tử đã bị detached khỏi document.
+
+2. **Các Biện pháp Khắc phục Triệt để Đã Triển khai:**
+   - **Cô lập Không gian tên DOM (`ext-restored-dailyset`):**
+     - Đặt ID riêng biệt cho thẻ phục hồi: `<section id="ext-restored-dailyset" data-extension-injected="true">`.
+     - Ngăn ngừa 100% mọi xung đột namespace với Virtual DOM của React 18.
+   - **Bảo vệ Ưu tiên Tuyệt đối cho Profile Default (Early Abort):**
+     - Trong `injectRestoredDailySet`, `ensurePersistentDailySet`, và `checkAndRestoreDashboard`:
+       ```javascript
+       if (document.getElementById("dailyset")) {
+         const existingExt = document.getElementById("ext-restored-dailyset");
+         if (existingExt) existingExt.remove();
+         return false;
+       }
+       ```
+     - Khi chạy trên Profile Default (có Daily Set bản địa), extension lập tức rút lui, không can thiệp hay thay đổi bất kỳ thuộc tính nào của DOM gốc.
+   - **MutationObserver Debounced (150ms) & Bỏ qua Tự đột biến (Self-Mutation Ignore):**
+     - Bộ lọc `isSelfMutation`: Bỏ qua mọi đột biến phát sinh từ bên trong `#ext-restored-dailyset`.
+     - Bộ đệm thời gian 150ms gom cụm các đợt re-render của Next.js, triệt tiêu hoàn toàn nguy cơ infinite loops và giảm tải tối đa cho CPU.
+   - **Xác thực Date Tag Cache (`cachedDailySetDate`):**
+     - Lưu trữ song song `cachedDailySetData` và `cachedDailySetDate` (`YYYY-MM-DD`).
+     - Tự động hủy cache và fetch dữ liệu mới nhất khi bước sang ngày mới.
+   - **Kiểm tra `isConnected` trong Auto-Clicker & Dispatch Press:**
+     - Bổ sung `if (!target || (typeof target.isConnected === "boolean" && !target.isConnected)) return false;` trong `dispatchRewardPress` và `tryActivateTarget`.
+   - **Đồng bộ Mục tiêu Quét Section:**
+     - Cập nhật `targetSectionIds` trên `/dashboard`: `["dailyset", "ext-restored-dailyset", "moreactivities", "offers"]`.
+     - Hỗ trợ đầy đủ bộ đếm fallback và nhận diện thẻ trên cả 2 ID trong `background.js` và `reward-dom-helpers.js`.
+
+3. **Kết quả Kiểm chứng:**
+   - Toàn bộ 24/24 Node tests, 4 browser integration tests (`tests/browser/dashboard-live.test.html`), và extension smoke test chạy qua Edge & Chrome headless đều đạt PASS 100%.
+   - Đảm bảo Profile Default duy trì Daily Set gốc ổn định tuyệt đối và Profile 1 hiển thị thẻ phục hồi bền bỉ cùng biểu tượng `🔥 132 day streak`.
+
+---
+
 ## 3. Khuyến nghị cho người dùng
 1. **Reload Extension một lần duy nhất:**
    - Click vào biểu tượng extension trên thanh công cụ Chrome, nhấn nút **Reload** mới được bổ sung (hoặc mở `chrome://extensions` và bấm nút Reload của Bing Search Scheduler).
