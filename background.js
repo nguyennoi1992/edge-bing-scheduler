@@ -946,9 +946,32 @@ async function autoClickRewards() {
           };
 
           const findReadyToClaimCard = () => {
+            const allButtons = Array.from(
+              document.querySelectorAll("button, [role='button'], [data-react-aria-pressable='true'], a"),
+            );
+            const directCard = allButtons.find((btn) => {
+              if (!isVisible(btn) || btn.disabled || btn.getAttribute("aria-disabled") === "true") return false;
+              const text = getNodeText(btn);
+              return window.READY_TO_CLAIM_LABEL_RE
+                ? window.READY_TO_CLAIM_LABEL_RE.test(text)
+                : /ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению/i.test(text);
+            });
+            if (directCard) {
+              const text = getNodeText(directCard);
+              const points = typeof window.parsePointsFromText === "function"
+                ? window.parsePointsFromText(text)
+                : 0;
+              return {
+                cardButton: directCard,
+                cardContainer: directCard,
+                points: points || 1,
+              };
+            }
+
             const elements = collectAllElements(document);
             const candidates = elements.filter((el) => {
               if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
+              if (el.children.length > 2) return false;
               if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
               const text = getNodeText(el);
               return /ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению/i.test(text);
@@ -957,7 +980,7 @@ async function autoClickRewards() {
             for (const cand of candidates) {
               const cardContainer =
                 cand.closest(
-                  "button, [role='button'], [data-react-aria-pressable='true'], [class*='card' i], [data-rac], section, div.flex",
+                  "button, [role='button'], [data-react-aria-pressable='true'], [class*='card' i], [data-rac], section",
                 ) || cand.parentElement;
               if (!cardContainer || !isVisible(cardContainer)) continue;
 
@@ -992,11 +1015,13 @@ async function autoClickRewards() {
 
           const findDialogClaimButton = (readyCardInfo) => {
             const CLAIM_POINTS_RE =
-              /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
+              window.CLAIM_MATCH_RE ||
+              /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы|pending.*claim|\bclaim\b|\bnhận\b/i;
 
             const dialogs = collectAllElements(document).filter((el) => {
               if (!(el instanceof HTMLElement)) return false;
               if (!isVisible(el)) return false;
+              if (el.classList?.contains("bottom-0") && el.classList?.contains("sticky")) return false;
               const role = (el.getAttribute("role") || "").toLowerCase();
               return (
                 role === "dialog" ||
@@ -1012,53 +1037,25 @@ async function autoClickRewards() {
             if (!dialogs.length) return null;
 
             for (const scope of dialogs) {
-              // 1. Search for an element with text matching "Claim points" inside or on a button
-              const candidateLabels = Array.from(
-                scope.querySelectorAll("button, [role='button'], [data-react-aria-pressable='true'], span, div, p, strong, b"),
-              ).filter((el) => {
-                if (!(el instanceof HTMLElement)) return false;
-                if (!isVisible(el)) return false;
-                const text = getNodeText(el);
-                return CLAIM_POINTS_RE.test(text) && !/ready to claim|sẵn sàng nhận/i.test(text);
-              });
-
-              for (const labelEl of candidateLabels) {
-                const btn = labelEl.closest(
-                  "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
-                );
-                if (
-                  btn &&
-                  isVisible(btn) &&
-                  !btn.disabled &&
-                  btn.getAttribute("aria-disabled") !== "true"
-                ) {
-                  if (readyCardInfo && (btn === readyCardInfo.cardButton || (readyCardInfo.cardContainer && readyCardInfo.cardContainer.contains(btn)))) {
-                    continue;
-                  }
-                  return btn;
-                }
-              }
-
-              // 2. Fallback: search for buttons whose text contains "claim points"
-              const button = Array.from(
+              const buttons = Array.from(
                 scope.querySelectorAll(
                   "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
                 ),
-              ).find((el) => {
-                if (!(el instanceof HTMLElement)) return false;
-                if (!isVisible(el)) return false;
-                if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
-                if (readyCardInfo && (el === readyCardInfo.cardButton || (readyCardInfo.cardContainer && readyCardInfo.cardContainer.contains(el)))) {
-                  return false;
+              );
+              for (const btn of buttons) {
+                if (!(btn instanceof HTMLElement) || !isVisible(btn)) continue;
+                if (btn.disabled || btn.getAttribute("aria-disabled") === "true") continue;
+                if (readyCardInfo && (btn === readyCardInfo.cardButton || (readyCardInfo.cardContainer && readyCardInfo.cardContainer.contains(btn)))) {
+                  continue;
                 }
-                const text = getNodeText(el);
-                if (/^(close|dismiss|how it works|đóng|bỏ qua)$/i.test(text)) return false;
-                const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
-                if (/close|dismiss/i.test(ariaLabel)) return false;
-                if (window.READY_TO_CLAIM_LABEL_RE ? window.READY_TO_CLAIM_LABEL_RE.test(text) : /ready to claim|sẵn sàng nhận/i.test(text)) return false;
-                return CLAIM_POINTS_RE.test(text);
-              });
-              if (button) return button;
+                const ariaLabel = (btn.getAttribute("aria-label") || "").toLowerCase();
+                const slot = (btn.getAttribute("slot") || "").toLowerCase();
+                if (slot === "close" || /close|dismiss|how it works|đóng|bỏ qua/i.test(ariaLabel)) continue;
+                const text = getNodeText(btn);
+                if (/how it works|close|dismiss|đóng|bỏ qua/i.test(text)) continue;
+                if (window.READY_TO_CLAIM_LABEL_RE ? window.READY_TO_CLAIM_LABEL_RE.test(text) : /ready to claim|sẵn sàng nhận/i.test(text)) continue;
+                if (CLAIM_POINTS_RE.test(text)) return btn;
+              }
             }
 
             return null;
@@ -1113,24 +1110,23 @@ async function autoClickRewards() {
             }
 
             console.log("[Rewards-Debug] claimReadyPoints: Claim points dialog found. Clicking claim...");
-            const innerTarget = claimPointsButton.querySelector(
-              "[class*='brand' i], [class*='Button'], span[class*='text' i], span",
-            );
-            const targetEl =
-              innerTarget && isVisible(innerTarget) ? innerTarget : claimPointsButton;
             const dialogScope =
               claimPointsButton.closest("dialog, [role='dialog'], [class*='flyout' i], section") ||
               null;
-            clickElement(targetEl);
+            clickElement(claimPointsButton);
             if (typeof window.dispatchRewardPress === "function") {
-              try { window.dispatchRewardPress(targetEl); } catch { }
+              try { window.dispatchRewardPress(claimPointsButton); } catch { }
             }
-            try {
-              for (const child of targetEl.querySelectorAll("span, p, div")) {
-                child.click();
+            const innerTarget = claimPointsButton.querySelector(
+              "[class*='brand' i], [class*='Button'], span[class*='text' i], span",
+            );
+            if (innerTarget && innerTarget !== claimPointsButton && isVisible(innerTarget)) {
+              clickElement(innerTarget);
+              if (typeof window.dispatchRewardPress === "function") {
+                try { window.dispatchRewardPress(innerTarget); } catch { }
               }
-            } catch { }
-            await sleep(2000);
+            }
+            await sleep(2500);
 
             if (dialogScope) {
               const closeSelectors =

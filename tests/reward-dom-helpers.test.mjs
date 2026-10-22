@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CLAIM_MATCH_RE,
   EMPTY_REWARD_STABLE_MS,
   READY_TO_CLAIM_LABEL_RE,
   classifyRewardScanState,
@@ -350,6 +351,8 @@ test("isCompletedQuestText detects completed and ratio-based quests", () => {
 test("READY_TO_CLAIM_LABEL_RE and parsePointsFromText correctly detect and extract ready points", () => {
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("Ready to claim"), true);
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("ready to claim"), true);
+  assert.equal(READY_TO_CLAIM_LABEL_RE.test("Ready to claim 6 Claim"), true);
+  assert.equal(READY_TO_CLAIM_LABEL_RE.test("Sẵn sàng nhận 6 Nhận"), true);
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("Ready to claim +6 points"), true);
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("Ready to claim!"), true);
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("Ready to claim! +6 points"), true);
@@ -365,6 +368,14 @@ test("READY_TO_CLAIM_LABEL_RE and parsePointsFromText correctly detect and extra
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("Earn more"), false);
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("Ready to claim +50 points when you complete 3 searches"), false);
   assert.equal(READY_TO_CLAIM_LABEL_RE.test("Ready to claim after completing your set"), false);
+
+  assert.equal(CLAIM_MATCH_RE.test("Claim points"), true);
+  assert.equal(CLAIM_MATCH_RE.test("6\n\nPending\n\nClaim points"), true);
+  assert.equal(CLAIM_MATCH_RE.test("Nhận điểm"), true);
+  assert.equal(CLAIM_MATCH_RE.test("Claim"), true);
+  assert.equal(CLAIM_MATCH_RE.test("Nhận"), true);
+  assert.equal(CLAIM_MATCH_RE.test("Pending"), false);
+  assert.equal(CLAIM_MATCH_RE.test("Earn more"), false);
 
   assert.equal(parsePointsFromText("Ready to claim +6 points"), 6);
   assert.equal(parsePointsFromText("Claim 1,000 points"), 1000);

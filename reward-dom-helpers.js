@@ -20,13 +20,13 @@ const QUEST_INFO_RE =
 const QUEST_STREAK_RE = /\b(?:\d+\s+days\s+in\s+a\s+row|for\s+\d+\s+days|streak)\b/i;
 
 export const READY_TO_CLAIM_LABEL_RE =
-  /^\s*(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?))?[\s!:]*|[\s!:]*)?\s*$/i;
+  /^\s*(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?|claim|nhận|reclamar|einlösen))?[\s!:]*|[\s!:]*)*(?:claim|nhận)?\s*$/i;
 
 export const CLAIM_TEXT_RE =
   /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^получить баллы$/i;
 
 export const CLAIM_MATCH_RE =
-  /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
+  /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы|pending.*claim|\bclaim\b|\bnhận\b/i;
 
 export function parsePointsFromText(text) {
   const input = typeof text === "string" ? text : String(text ?? "");

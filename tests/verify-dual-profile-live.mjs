@@ -128,8 +128,23 @@ async function verifyProfile({ name, userDir, profileDir, port }) {
     const dashData = dashboardCheck.result?.result?.value;
     console.log(`[${name}] Dashboard Daily Set:`, JSON.stringify(dashData, null, 2));
 
+    // 3. Verify Claim Ready Points status
+    const claimCheck = await cdp(ws, 7, "Runtime.evaluate", {
+      expression: `(() => {
+        const buttons = Array.from(document.querySelectorAll("button, [role='button'], [data-react-aria-pressable='true']"));
+        const cardBtn = buttons.find(b => /ready to claim|sẵn sàng nhận/i.test(b.innerText || ""));
+        return {
+          hasReadyCard: Boolean(cardBtn),
+          cardText: cardBtn ? (cardBtn.innerText || "").replace(/\\s+/g, " ").trim() : "None"
+        };
+      })()`,
+      returnByValue: true
+    });
+    const claimData = claimCheck.result?.result?.value;
+    console.log(`[${name}] Claim Points Status:`, JSON.stringify(claimData, null, 2));
+
     ws.close();
-    return { name, flyoutData, dashData };
+    return { name, flyoutData, dashData, claimData };
   } finally {
     chromeProc.kill("SIGKILL");
   }
@@ -156,11 +171,13 @@ async function main() {
   console.log(`  - Panelflyout Cards Complete: ${p1.flyoutData?.dailySetCards?.every(c => c.complete) ? "ALL COMPLETE (3/3)" : "SOME INCOMPLETE"}`);
   console.log(`  - Points: ${p1.flyoutData?.availablePoints}, Streak: ${p1.flyoutData?.streakDays} days`);
   console.log(`  - Dashboard Daily Set: ${p1.dashData?.hasExtDailySet ? "Rendered via #ext-restored-dailyset" : "Not Rendered"}`);
+  console.log(`  - Claim Card Status: ${p1.claimData?.cardText}`);
 
   console.log(`Default Profile (Native React):`);
   console.log(`  - Panelflyout Cards Complete: ${pDef.flyoutData?.dailySetCards?.every(c => c.complete) ? "ALL COMPLETE (3/3)" : "SOME INCOMPLETE"}`);
   console.log(`  - Points: ${pDef.flyoutData?.availablePoints}, Streak: ${pDef.flyoutData?.streakDays} days`);
   console.log(`  - Dashboard Daily Set: ${pDef.dashData?.hasNativeDailySet ? "Rendered natively via #dailyset" : "Not Rendered"}`);
+  console.log(`  - Claim Card Status: ${pDef.claimData?.cardText}`);
   console.log("============================================================\n");
 }
 

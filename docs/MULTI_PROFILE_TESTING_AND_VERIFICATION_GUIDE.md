@@ -253,3 +253,53 @@ Verified Scanner Output: {
   ]
 }
 ```
+
+---
+
+## 8. Cơ Chế Tự Động Hóa Flow "Ready to claim" / "Claim points"
+
+### 8.1. Cấu trúc DOM & Rào cản kỹ thuật
+Trên trang `https://rewards.bing.com/dashboard`, người dùng thường có các khoản điểm thưởng sẵn sàng để nhận ("Ready to claim"), ví dụ: *"First search of the day bonus"* (6 điểm).
+- **Thẻ kích hoạt trên Dashboard:**
+  ```html
+  <button class="... rounded-cornerCardDefault" data-rac="" type="button" aria-expanded="false" data-react-aria-pressable="true">
+    Text: "Ready to claim\n\n6\n\nClaim"
+  </button>
+  ```
+- **Flyout Dialog khi mở ra:**
+  `<section role="dialog" data-rac="" class="outline-0" aria-labelledby="...">` với container `shadow-shadowFlyout bg-flyout`.
+  - Bên trong có skeleton loader khi mới mở, sau đó render danh sách hoạt động kèm nút xác nhận:
+    ```html
+    <button class="... rounded-cornerCardDefault" data-rac="" type="button" data-react-aria-pressable="true">
+      <p>6</p>
+      <div>Pending</div>
+      <div class="... bg-bgCtrlBrandRest text-fgCtrlOnBrandRest">
+        <span>Claim points</span>
+      </div>
+    </button>
+    ```
+  - Và nút đóng flyout: `<button slot="close" aria-label="Close">`.
+
+### 8.2. Nguyên nhân lỗi trước đây
+1. **Tìm kiếm phần tử bao phủ quá rộng:** Quét `document.querySelectorAll("*")` khớp phải các thẻ cha cấp cao (`<html>`, `<body>`, `div.flex`), dẫn đến `cardContainer.querySelector("button")` lấy nhầm nút điều hướng khác thay vì nút "Ready to claim".
+2. **Sai lệch chuỗi sự kiện React Aria:** React Aria (`usePress`) yêu cầu chuỗi PointerEvents hoàn chỉnh (`pointerdown` với `pointerId: 1`, `pointerType: "mouse"`, `isPrimary: true`, `pressure: 0.5`) trên chính phần tử `<button data-react-aria-pressable="true">`, không chỉ gọi `.click()` trên `<span>` con.
+3. **Mẫu regex chưa bao quát:** Thẻ ban đầu có text `"Ready to claim 6 Claim"`, và nút confirm có text `"6 Pending Claim points"` hoặc chỉ `"Claim"` / `"Nhận"`. Regex cũ đòi hỏi cụm từ cố định `"claim points"` nên bỏ qua.
+4. **Không đợi flyout tải xong dữ liệu:** Flyout mở ra có độ trễ tải backend; việc kiểm tra nút confirm ngay tại thời điểm flyout mount sẽ gặp mảng rỗng (skeleton loader).
+
+### 8.3. Giải pháp chuẩn hóa
+1. **Ưu tiên quét trực tiếp button / pressable:**
+   Duyệt `button, [role='button'], [data-react-aria-pressable='true'], a` kết hợp `READY_TO_CLAIM_LABEL_RE` mở rộng:
+   ```javascript
+   /^\s*(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?|claim|nhận|reclamar|einlösen))?[\s!:]*|[\s!:]*)*(?:claim|nhận)?\s*$/i
+   ```
+2. **Mô phỏng React Aria Pointer Events:**
+   Kích hoạt đầy đủ `pointerdown` -> `mousedown` -> `pointerup` -> `mouseup` -> `click` trên nút bấm mục tiêu.
+3. **Loại bỏ banner cookies và polling đợi flyout render:**
+   Bỏ qua các phần tử cố định dính đáy (`bottom-0` & `sticky`), poll kiểm tra nút confirm bên trong `<section role="dialog">` đến khi xuất hiện.
+4. **Nhấp nút confirm và dọn dẹp:**
+   Kích hoạt claim trên button confirm, đợi 2.5s để mutation server cập nhật, sau đó nhấn nút `button[slot="close"]` để đóng flyout.
+5. **Kiểm chứng thực tế:**
+   Đã chạy kiểm chứng trên cả `Profile 1` và `Default Profile` qua virtual display (`run-with-virtual-display.sh`):
+   - Thẻ điểm chuyển trạng thái từ 6 về 0: `"Ready to claim 0 Claim"`.
+   - Điểm khả dụng (Available points) tăng tương ứng trên tài khoản (ví dụ Profile Default tăng từ 1192 lên 1198).
+

@@ -151,6 +151,16 @@ export async function finishBrowserTest(name, callback) {
 }
 
 export function findReadyToClaimCard(rootNode = document) {
+  const directButtons = Array.from(rootNode.querySelectorAll("button, [role='button'], a[role='button'], [data-react-aria-pressable='true']"));
+  for (const cardButton of directButtons) {
+    if (!isVisible(cardButton) || cardButton.disabled || cardButton.getAttribute("aria-disabled") === "true") continue;
+    const text = normalizeRewardText(cardButton.innerText || cardButton.textContent || "");
+    if (READY_TO_CLAIM_LABEL_RE.test(text)) {
+      const points = parsePointsFromText(text);
+      if (points > 0) return { cardButton, points };
+    }
+  }
+
   const elements = Array.from(rootNode.querySelectorAll("*"));
   const labels = elements.filter((el) => {
     if (!(el instanceof HTMLElement)) return false;
