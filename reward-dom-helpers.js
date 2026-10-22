@@ -269,7 +269,13 @@ export function isActionableQuestActivity(meta = {}) {
   const label = normalizeRewardText(`${ariaLabel} ${innerLabel}`).toLowerCase();
 
   if (meta.isVisible === false) return false;
-  if (meta.isDisabled) return false;
+  const hasValidHref = Boolean(meta.href && !/^(?:#|javascript:)/i.test(meta.href.trim()));
+  const isExclusiveApp =
+    meta.isExclusiveAppCard ||
+    /\b(?:rewards\s+app|bing\s+app|exclusive)\b/i.test(label) ||
+    /[?&](?:PUBL=RewardsDO|form=ML2Y2H|rnoreward=1)\b/i.test(meta.href || "");
+
+  if (meta.isDisabled && (!isExclusiveApp || !hasValidHref)) return false;
   if (meta.isInNav) return false;
   if (meta.isQuestCard) return false;
   if (!label) return false;
@@ -278,7 +284,6 @@ export function isActionableQuestActivity(meta = {}) {
   if (QUEST_CHROME_RE.test(label)) return false;
   if (QUEST_CLOSE_RE.test(innerLabel)) return false;
   if (QUEST_INFO_RE.test(innerLabel) || QUEST_INFO_RE.test(ariaLabel) || QUEST_INFO_RE.test(label)) return false;
-  const hasValidHref = Boolean(meta.href && !/^(?:#|javascript:)/i.test(meta.href.trim()));
   if (!hasValidHref && !meta.isPressable) return false;
   if (!hasValidHref && QUEST_STREAK_RE.test(label)) return false;
 

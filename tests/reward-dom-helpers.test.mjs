@@ -510,6 +510,40 @@ test("isActionableQuestActivity filters info headers, streak indicators without 
     }),
     false,
   );
+
+  // Rewards App exclusive / Bing App exclusive cards are actionable even if marked disabled on desktop web
+  assert.equal(
+    isActionableQuestActivity({
+      ...base,
+      href: "https://www.bing.com/search?q=Puppy+images&form=ML2Y2H&OCID=ML2Y2H&PUBL=RewardsDO&CREA=ML2Y2H&rnoreward=1",
+      ariaLabel: "Rewards App exclusive, Puppy pics!",
+      innerLabel: "Rewards App exclusive",
+      isDisabled: true,
+    }),
+    true,
+  );
+  // Disabled cards without app exclusive markers or telemetry tags remain disabled
+  assert.equal(
+    isActionableQuestActivity({
+      ...base,
+      href: "https://www.bing.com/search?q=Generic+search",
+      innerLabel: "Generic activity",
+      isDisabled: true,
+    }),
+    false,
+  );
+  // App exclusive cards that are already completed remain non-actionable
+  assert.equal(
+    isActionableQuestActivity({
+      ...base,
+      href: "https://www.bing.com/search?q=Puppy+images&form=ML2Y2H&OCID=ML2Y2H&PUBL=RewardsDO&CREA=ML2Y2H&rnoreward=1",
+      ariaLabel: "Rewards App exclusive, Puppy pics!",
+      innerLabel: "Rewards App exclusive",
+      isDisabled: true,
+      hasSuccessBadge: true,
+    }),
+    false,
+  );
 });
 
 test("isActionableRewardCard rejects placeholder hrefs when not pressable", () => {

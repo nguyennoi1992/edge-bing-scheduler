@@ -637,7 +637,13 @@ async function injectDomHelpers(tabId) {
         const label = window.normalizeRewardText(`${ariaLabel} ${innerLabel}`).toLowerCase();
 
         if (meta.isVisible === false) return false;
-        if (meta.isDisabled) return false;
+        const hasValidHref = Boolean(meta.href && !/^(?:#|javascript:)/i.test(meta.href.trim()));
+        const isExclusiveApp =
+          meta.isExclusiveAppCard ||
+          /\b(?:rewards\s+app|bing\s+app|exclusive)\b/i.test(label) ||
+          /[?&](?:PUBL=RewardsDO|form=ML2Y2H|rnoreward=1)\b/i.test(meta.href || "");
+
+        if (meta.isDisabled && (!isExclusiveApp || !hasValidHref)) return false;
         if (meta.isInNav) return false;
         if (meta.isQuestCard) return false;
         if (!label) return false;
@@ -646,7 +652,6 @@ async function injectDomHelpers(tabId) {
         if (QUEST_CHROME_RE.test(label)) return false;
         if (QUEST_CLOSE_RE.test(innerLabel)) return false;
         if (QUEST_INFO_RE.test(innerLabel) || QUEST_INFO_RE.test(ariaLabel) || QUEST_INFO_RE.test(label)) return false;
-        const hasValidHref = Boolean(meta.href && !/^(?:#|javascript:)/i.test(meta.href.trim()));
         if (!hasValidHref && !meta.isPressable) return false;
         if (!hasValidHref && QUEST_STREAK_RE.test(label)) return false;
 
@@ -1850,31 +1855,29 @@ async function autoClickRewards() {
 
           const candidates = Array.from(
             activitiesRoot.querySelectorAll(
-              "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']"
+              "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true']"
             )
           );
           
           const uniqueCards = new Set();
           const activityCards = [];
           for (const cand of candidates) {
-            const card = cand.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
+            const card = cand.closest(".flex-row, [role='row'], [role='listitem'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
             if (!uniqueCards.has(card) && isVisible(card) && !card.closest("#quests")) {
               uniqueCards.add(card);
-              activityCards.push(card);
+              activityCards.push({ card, cand });
             }
           }
           console.log("[Rewards-Debug] getQuestActivities: Found " + activityCards.length + " activity cards inside root. Filtering actionable ones...");
 
           const seen = new Set();
           const items = [];
-          for (const card of activityCards) {
+          for (const { card, cand } of activityCards) {
             const cardText = window.normalizeRewardText(card.innerText || card.textContent || "");
-            const actionTarget =
-              card.querySelector("button:not([aria-disabled='true']), [role='button']:not([aria-disabled='true']), a[href], [role='link'], [data-react-aria-pressable='true']") ||
-              card;
-            const href = actionTarget.href || actionTarget.getAttribute("href") || "";
+            const actionTarget = cand;
+            const href = actionTarget.href || actionTarget.getAttribute("href") || card.getAttribute("href") || card.querySelector("[href]")?.getAttribute("href") || "";
             const innerLabel = window.normalizeRewardText(actionTarget.innerText || actionTarget.textContent || cardText);
-            const ariaLabel = window.normalizeRewardText(actionTarget.getAttribute("aria-label") || "");
+            const ariaLabel = window.normalizeRewardText(actionTarget.getAttribute("aria-label") || card.getAttribute("aria-label") || "");
             const label = ariaLabel || innerLabel || cardText;
             const hasSuccessBadge =
               !!card.closest("[class*='completed'], [class*='Success']") ||
@@ -1901,6 +1904,9 @@ async function autoClickRewards() {
                 }
               }
             }
+            const isExclusiveApp =
+              /\b(?:rewards\s+app|bing\s+app|exclusive)\b/i.test(`${label} ${cardText}`) ||
+              /[?&](?:PUBL=RewardsDO|form=ML2Y2H|rnoreward=1)\b/i.test(href);
             const isActionable = window.isActionableQuestActivity({
               href,
               innerLabel: label,
@@ -1914,6 +1920,7 @@ async function autoClickRewards() {
               isQuestCard: false,
               hasSuccessBadge,
               isCompleted,
+              isExclusiveAppCard: isExclusiveApp,
             });
             if (!isActionable) continue;
             const key = window.buildQuestActivityKey({ href, innerLabel: `${cardText} ${label}`, ariaLabel: "" });
@@ -1974,30 +1981,28 @@ async function autoClickRewards() {
             if (activitiesRoot) {
               const candidates = Array.from(
                 activitiesRoot.querySelectorAll(
-                  "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']"
+                  "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true']"
                 )
               );
               
               const uniqueCards = new Set();
               const cards = [];
               for (const cand of candidates) {
-                const card = cand.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
+                const card = cand.closest(".flex-row, [role='row'], [role='listitem'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
                 if (!uniqueCards.has(card) && isVisible(card) && !card.closest("#quests")) {
                   uniqueCards.add(card);
-                  cards.push(card);
+                  cards.push({ card, cand });
                 }
               }
 
-              for (const candidate of cards) {
+              for (const { card: candidate, cand: target } of cards) {
                 const cardText = window.normalizeRewardText(candidate.innerText || candidate.textContent || "");
-                const target =
-                  candidate.querySelector("button:not([aria-disabled='true']), [role='button']:not([aria-disabled='true']), a[href], [role='link'], [data-react-aria-pressable='true']") ||
-                  candidate;
-                const href = target.href || target.getAttribute("href") || "";
+                const href = target.href || target.getAttribute("href") || candidate.getAttribute("href") || candidate.querySelector("[href]")?.getAttribute("href") || "";
                 const innerLabel = window.normalizeRewardText(target.innerText || target.textContent || cardText);
+                const ariaLabel = window.normalizeRewardText(target.getAttribute("aria-label") || candidate.getAttribute("aria-label") || "");
                 const candKey = window.buildQuestActivityKey({
                   href,
-                  innerLabel: `${cardText} ${innerLabel || cardText}`,
+                  innerLabel: `${cardText} ${ariaLabel || innerLabel || cardText}`,
                   ariaLabel: "",
                 });
                 const hasSuccessBadge =
@@ -2025,10 +2030,13 @@ async function autoClickRewards() {
                     }
                   }
                 }
+                const isExclusiveApp =
+                  /\b(?:rewards\s+app|bing\s+app|exclusive)\b/i.test(`${ariaLabel} ${innerLabel} ${cardText}`) ||
+                  /[?&](?:PUBL=RewardsDO|form=ML2Y2H|rnoreward=1)\b/i.test(href);
                 const isMatchable = window.isActionableQuestActivity({
                   href,
                   innerLabel: innerLabel || cardText,
-                  ariaLabel: "",
+                  ariaLabel,
                   isVisible: true,
                   isPressable: target.matches?.("button, [role='button'], [role='link'], a[href], [data-react-aria-pressable='true']"),
                   isDisabled:
@@ -2038,6 +2046,7 @@ async function autoClickRewards() {
                   isQuestCard: false,
                   hasSuccessBadge,
                   isCompleted,
+                  isExclusiveAppCard: isExclusiveApp,
                 });
                 if (!isMatchable) continue;
 
@@ -2185,12 +2194,19 @@ async function autoClickRewards() {
           }
 
           return {
-            clicked: success,
+            clicked:
+              success ||
+              Boolean(
+                actionEl?.getAttribute?.("href") ||
+                actionEl?.href ||
+                el?.getAttribute?.("href") ||
+                el?.href
+              ),
             href:
               actionEl?.href ||
               actionEl?.getAttribute?.("href") ||
-              el.href ||
-              el.getAttribute("href") ||
+              el?.href ||
+              el?.getAttribute?.("href") ||
               "",
           };
         },
@@ -3870,8 +3886,9 @@ async function autoClickRewards() {
           await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
 
+          await enableRewardMobileEmulation();
           const attemptedActivityKeys = new Set();
-          const maxQuestActivities = 6;
+          const maxQuestActivities = 8;
 
           for (let j = 0; j < maxQuestActivities; j++) {
             if (timedOut() || remainingMs() < MIN_QUEST_REMAINING_BUDGET_MS) {
@@ -3906,12 +3923,12 @@ async function autoClickRewards() {
             );
 
             const childBaselineIds = await getCurrentTabIdSet();
-        const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
-        const structuredClickResult = clickResult && typeof clickResult === "object"
-          ? clickResult
-          : { clicked: !!clickResult, href: "" };
-        const wasClicked = structuredClickResult.clicked;
-        const targetHref = structuredClickResult.href;
+            const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
+            const structuredClickResult = clickResult && typeof clickResult === "object"
+              ? clickResult
+              : { clicked: !!clickResult, href: "" };
+            const wasClicked = structuredClickResult.clicked;
+            const targetHref = structuredClickResult.href;
 
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
@@ -3921,7 +3938,7 @@ async function autoClickRewards() {
             );
 
             // Fallback: If no new tab opened, but we have a valid href, manually open it to register the punch
-            if (newTabIds.length === 0 && wasClicked && (targetHref || nextActivity.href)) {
+            if (newTabIds.length === 0 && (wasClicked || targetHref || nextActivity.href)) {
               let fullHref = targetHref || nextActivity.href;
               if (fullHref.startsWith("/")) {
                 fullHref = "https://rewards.bing.com" + fullHref;
@@ -3945,6 +3962,22 @@ async function autoClickRewards() {
               try {
                 // Ensure the tab is active so that tracking pixels fire properly
                 await chrome.tabs.update(childTabId, { active: true });
+                try {
+                  await chrome.scripting.executeScript({
+                    target: { tabId: childTabId },
+                    world: "MAIN",
+                    args: [REWARD_MOBILE_USER_AGENT],
+                    func: (ua) => {
+                      try {
+                        Object.defineProperty(navigator, "userAgent", { get: () => ua, configurable: true });
+                        if (navigator.userAgentData) {
+                          Object.defineProperty(navigator.userAgentData, "mobile", { get: () => true, configurable: true });
+                          Object.defineProperty(navigator.userAgentData, "platform", { get: () => "Android", configurable: true });
+                        }
+                      } catch {}
+                    },
+                  });
+                } catch {}
                 await waitForTabComplete(childTabId);
                 await humanScrollOnTab(childTabId);
               } catch { }

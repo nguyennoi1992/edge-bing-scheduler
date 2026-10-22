@@ -209,3 +209,47 @@ Tất cả các tài liệu kỹ thuật, nghiên cứu và báo cáo bugfix đ�
 2. [`docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md`](file:///u01/tools/edge-bing-scheduler/docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md): Nhật ký kỹ thuật chi tiết về flight `vsstreak`, cơ chế phục hồi `#ext-restored-dailyset`, phát hiện endpoint `/msrewards/api/v1/reportactivity` và chứng minh thực nghiệm.
 3. [`docs/optimization-2026-10-12-rewards-hydration-scheduler.md`](file:///u01/tools/edge-bing-scheduler/docs/optimization-2026-10-12-rewards-hydration-scheduler.md): Tối ưu hóa bộ quét hydration, cơ chế retry ổn định trên các trang Rewards React.
 4. [`docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md`](file:///u01/tools/edge-bing-scheduler/docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md): Xử lý lỗi bảo vệ trang scripting trên Microsoft Edge.
+
+---
+
+## 7. Cơ Chế Xử Lý & Kiểm Thử Quests / Punchcards Yêu Cầu Bing App Exclusive
+
+### 7.1. Cấu trúc nhiệm vụ "Rewards App exclusive"
+Ví dụ điển hình: [`WW_pcparent_RewardsApp_weekly_Exclusive_Octw3_2026_punchcard`](https://rewards.bing.com/earn/quest/WW_pcparent_RewardsApp_weekly_Exclusive_Octw3_2026_punchcard)
+- **Mục tiêu:** Nhận tối đa 70 điểm/tuần qua 8 hoạt động (1 tác vụ khởi tạo + 7 ngày trong tuần từ Sunday đến Saturday: `WW_pcchild2_urlreward_Sunday...` đến `WW_pcchild8_urlreward_Saturday...`).
+- **Giao diện web desktop:** Microsoft Rewards khóa hiển thị với nút `<span role="link" aria-disabled="true" data-disabled="true">`, nhãn `"Rewards App exclusive"`, chứa link tìm kiếm kèm tham số telemetry chuyên biệt:
+  `https://www.bing.com/search?q=...&form=ML2Y2H&OCID=ML2Y2H&PUBL=RewardsDO&CREA=ML2Y2H&rnoreward=1`
+- **Ý nghĩa tham số:**
+  - `form=ML2Y2H`, `OCID=ML2Y2H`, `PUBL=RewardsDO`: Mã định danh chiến dịch Desktop Rewards App / Bing App.
+  - `rnoreward=1`: Chỉ định backend không trừ quota search thông thường mà chuyển trực tiếp sang hệ thống Punchcard / Quest tracking.
+
+### 7.2. Giải pháp tự động hóa của Extension
+1. **Bỏ qua rào cản `aria-disabled="true"` trên web:**
+   - Trong `isActionableQuestActivity` và `getQuestActivities`, nếu phần tử có nhãn `"rewards app"`, `"bing app"`, `"exclusive"` hoặc chứa các cờ `RewardsDO`, `ML2Y2H`, `rnoreward=1`, extension giữ lại và xử lý như một thẻ hoạt động hợp lệ thay vì bỏ qua.
+2. **Bóc tách cấu trúc từng dòng hoạt động (`.flex-row`):**
+   - Bộ gom nhóm DOM mở rộng `.flex-row, [role='row'], [role='listitem']` tách biệt chính xác cả 7 hoạt động độc lập bên trong cùng một bảng danh sách.
+3. **Mở tab dự phòng (`fallbackTab`):**
+   - Do phần tử là thẻ `<span>` có thuộc tính `href`, sự kiện `.click()` DOM thuần có thể không kích hoạt chuyển hướng. Extension phát hiện nếu không có tab mới mở ra, sẽ tự động dùng `chrome.tabs.create({ url: fullHref, active: true })`.
+4. **Giả lập môi trường Mobile / Bing App với DNR:**
+   - Bật `enableRewardMobileEmulation()` (DNR Rule 9021 với UA Edge Android: `EdgA/130.0.0.0`, `sec-ch-ua-mobile: ?1`, `sec-ch-ua-platform: "Android"`) trong suốt chu trình chạy quest activities.
+   - Tiêm đè `navigator.userAgent` và `navigator.userAgentData` vào tab con ở MAIN world để telemetry client-side của Bing xác nhận hợp lệ.
+
+### 7.3. Quy trình xác minh độc lập
+```bash
+/u01/workspace/FacebookBot/scripts/run-with-virtual-display.sh env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_CURRENT_DESKTOP=GNOME node /tmp/test-extension-injected-quest-scan.mjs
+```
+Kết quả kiểm tra:
+```json
+Verified Scanner Output: {
+  "count": 7,
+  "items": [
+    { "label": "Rewards App exclusive, Indoor herbs", "isExclusiveApp": true },
+    { "label": "Rewards App exclusive, HIIT workout at home", "isExclusiveApp": true },
+    { "label": "Rewards App exclusive, Laugh out loud", "isExclusiveApp": true },
+    { "label": "Rewards App exclusive, Westerlies explained", "isExclusiveApp": true },
+    { "label": "Rewards App exclusive, Puppy pics!", "isExclusiveApp": true },
+    { "label": "Rewards App exclusive, Writing for beginners", "isExclusiveApp": true },
+    { "label": "Rewards App exclusive, Learn a new skill", "isExclusiveApp": true }
+  ]
+}
+```

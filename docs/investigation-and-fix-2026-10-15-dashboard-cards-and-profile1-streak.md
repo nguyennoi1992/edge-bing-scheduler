@@ -330,3 +330,27 @@ Kiểm tra trực tiếp trên virtual display (`run-with-virtual-display.sh`) v
 - **Automated Test Suite:**
   - 24/24 Node tests pass.
   - Toàn bộ browser test trên Microsoft Edge pass.
+
+---
+
+## 10. Mở Rộng: Tự Động Hóa Quests & Punchcards Yêu Cầu Bing App / Rewards App Exclusive
+
+### 10.1. Yêu cầu & Bối cảnh
+Người dùng cần kiểm tra và tự động hóa các nhiệm vụ punchcard trong Quests có yêu cầu Bing Rewards App, ví dụ:
+`https://rewards.bing.com/earn/quest/WW_pcparent_RewardsApp_weekly_Exclusive_Octw3_2026_punchcard`
+
+### 10.2. Kết quả Rà soát & Đánh giá từ Gemini 4 Argon (`gemini2api:18620`)
+1. **Bản chất rào cản:** Trạng thái `aria-disabled="true"` và class mờ trên web desktop chỉ là rào chắn giao diện (frontend guardrail).
+2. **Cơ chế Telemetry:** Các tham số `form=ML2Y2H`, `OCID=ML2Y2H`, `PUBL=RewardsDO` đóng vai trò telemetry tag phân loại chiến dịch app. Cờ `rnoreward=1` chỉ định backend không tính vào giới hạn search thông thường mà ghi nhận vào subsystem Punchcard.
+3. **Điều kiện máy chủ:** Khi truy cập liên kết, backend của Bing kiểm tra Client Hints (`sec-ch-ua-mobile: ?1`, `sec-ch-ua-platform: "Android"`) và User-Agent (chứa `EdgA/...`).
+4. **Giải pháp Extension:**
+   - Trích xuất `href` từ các thẻ `<span>` mang thuộc tính `role="link"` và nhãn `Rewards App exclusive`.
+   - Bật DNR rule 9021 (Mobile Emulation) khi thực thi quest activities.
+   - Khi click thẻ không tự sinh tab con, tự động mở fallback tab với URL tìm kiếm mang tham số telemetry.
+   - Tiêm đè `navigator.userAgent` và `navigator.userAgentData` vào tab con ở MAIN execution world.
+
+### 10.3. Triển khai & Xác minh thực tế
+- File cập nhật: `reward-dom-helpers.js`, `background.js`, `tests/reward-dom-helpers.test.mjs`.
+- Kết quả kiểm chứng trên Virtual Display (`/tmp/test-extension-injected-quest-scan.mjs`):
+  - Nhận diện đầy đủ 7/7 tác vụ exclusive còn lại trong Weekly Punchcard (`WW_pcchild2` -> `WW_pcchild8`).
+  - Toàn bộ 24 test trong test suite đều pass 100%.
