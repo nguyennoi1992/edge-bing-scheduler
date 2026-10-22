@@ -232,7 +232,7 @@
         streakDays: 132,
         cards: [
           { name: "C1", title: "Test 1", description: "Desc 1", points: 10, complete: false, destinationUrl: "https://www.bing.com/search?q=1", imageUrl: "" },
-          { name: "C2", title: "Test 2", description: "Desc 2", points: 10, complete: true, destinationUrl: "https://www.bing.com/search?q=2", imageUrl: "" }
+          { name: "C2", title: "Test 2", description: "Desc 2", points: 10, complete: true, destinationUrl: "https://www.bing.com/search?q=2&filters=sid:\"test-sid\"&rnoreward=1", imageUrl: "" }
         ]
       };
 
@@ -261,6 +261,9 @@
       const recovered = document.getElementById("ext-restored-dailyset");
       assert(recovered !== null, "ext-restored-dailyset should be automatically re-mounted by MutationObserver");
       assertEqual(recovered.querySelectorAll("a[href]").length, 2, "recovered ext-restored-dailyset should contain 2 cards");
+      const c2Card = recovered.querySelector("a[data-reward-card-name='C2']");
+      assert(c2Card !== null, "c2Card should exist");
+      assert(c2Card.getAttribute("href").includes("test-sid"), "c2Card href should not be truncated by quotes");
     });
   </script>
 </body>

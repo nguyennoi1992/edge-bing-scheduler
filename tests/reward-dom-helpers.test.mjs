@@ -799,6 +799,13 @@ test("isCardCompleted correctly identifies completed cards via SVG badges, mee-i
   // 15. Null/undefined safety
   assert.equal(isCardCompleted(null), false, "null card");
   assert.equal(isCardCompleted(undefined), false, "undefined card");
+
+  // 16. data-ext-completed attribute detection
+  const restoredCard = {
+    getAttribute: (attr) => (attr === "data-ext-completed" ? "true" : null),
+    querySelector: () => null,
+  };
+  assert.equal(isCardCompleted(restoredCard), true, "card with data-ext-completed='true'");
 });
 
 test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak counter", () => {
@@ -828,7 +835,7 @@ test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak
                   "pointProgressMax": 10,
                   "pointProgress": 10,
                   "complete": true,
-                  "destinationUrl": "https://www.bing.com/search?q=Cairns",
+                  "destinationUrl": "https://www.bing.com/search?q=Cairns&filters=sid:\\\"a6b4-uuid\\\"&rnoreward=1",
                   "imageUrl": "https://bing.com/img2.png"
                 }
               ]
@@ -855,6 +862,7 @@ test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak
   assert.equal(parsed.cards[0].complete, false);
   assert.equal(parsed.cards[0].destinationUrl, "https://www.bing.com/search?q=Tokyo");
   assert.equal(parsed.cards[1].complete, true);
+  assert.equal(parsed.cards[1].destinationUrl, "https://www.bing.com/search?q=Cairns&filters=sid:%22a6b4-uuid%22&rnoreward=1");
 
   // Safety checks
   assert.equal(extractDailySetFromFlyoutHtml(null), null);

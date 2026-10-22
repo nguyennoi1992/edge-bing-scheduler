@@ -410,7 +410,7 @@ export function extractDailySetFromFlyoutHtml(html) {
       title: c.title || "",
       description: c.description || "",
       points: c.pointProgressMax || 10,
-      destinationUrl: c.destinationUrl || "",
+      destinationUrl: (c.destinationUrl || "").replace(/"/g, "%22"),
       imageUrl: c.imageUrl || c.smallImageUrl || "",
       complete: Boolean(c.complete),
     })),

@@ -23,7 +23,7 @@ const ALARM_NAME = "bingScheduler";
 const BADGE_ALARM = "badgeTick";
 const REWARDS_SETTLE_MS = 8000;
 const REWARD_CHILD_SYNC_MS = 5000;
-const REWARD_URL_TIMEOUT_MS = 240000;
+const REWARD_URL_TIMEOUT_MS = 360000;
 const MIN_QUEST_REMAINING_BUDGET_MS = 60000;
 const DEBUG_LOGS_KEY = 'debugLogs';
 const DEBUG_LOG_RETENTION_DAYS = 7;
@@ -499,6 +499,8 @@ async function injectDomHelpers(tabId) {
 
       window.isCardCompleted = function isCardCompleted(cardEl) {
         if (!cardEl) return false;
+        if (cardEl.getAttribute?.("data-ext-completed") === "true") return true;
+        if (cardEl.querySelector?.("[data-ext-completed='true']")) return true;
         const BADGE_SELECTOR =
           "[class*='statusSuccess'], [class*='Success'], [class*='CheckMark'], [class*='checkMark']";
         const DIRECT_BADGE_SELECTOR =
@@ -754,6 +756,65 @@ async function fetchAndRestoreDailySet(tabId, { forceFresh = false } = {}) {
 }
 globalThis.fetchAndRestoreDailySet = fetchAndRestoreDailySet;
 globalThis.extractDailySetFromFlyoutHtml = extractDailySetFromFlyoutHtml;
+
+const REWARD_MOBILE_DNR_RULE_ID = 9021;
+const REWARD_MOBILE_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.0.0";
+
+async function enableRewardMobileEmulation() {
+  if (!chrome.declarativeNetRequest?.updateSessionRules) return;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [REWARD_MOBILE_DNR_RULE_ID],
+      addRules: [
+        {
+          id: REWARD_MOBILE_DNR_RULE_ID,
+          priority: 2,
+          action: {
+            type: "modifyHeaders",
+            requestHeaders: [
+              { header: "User-Agent", operation: "set", value: REWARD_MOBILE_USER_AGENT },
+              { header: "sec-ch-ua-mobile", operation: "set", value: "?1" },
+              { header: "sec-ch-ua-platform", operation: "set", value: '"Android"' },
+              {
+                header: "sec-ch-ua",
+                operation: "set",
+                value: '"Chromium";v="130", "Microsoft Edge";v="130", "Not?A_Brand";v="99"',
+              },
+            ],
+          },
+          condition: {
+            urlFilter: "||bing.com/search?*",
+            resourceTypes: [
+              "main_frame",
+              "sub_frame",
+              "xmlhttprequest",
+              "fetch",
+              "other",
+            ],
+          },
+        },
+      ],
+    });
+    console.log("[Rewards] Mobile emulation DNR session rule enabled for Bing search");
+  } catch (err) {
+    console.warn("[Rewards] Failed to enable mobile emulation DNR rule:", err);
+  }
+}
+
+async function disableRewardMobileEmulation() {
+  if (!chrome.declarativeNetRequest?.updateSessionRules) return;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [REWARD_MOBILE_DNR_RULE_ID],
+    });
+    console.log("[Rewards] Mobile emulation DNR session rule disabled");
+  } catch (err) {
+    console.warn("[Rewards] Failed to disable mobile emulation DNR rule:", err);
+  }
+}
+globalThis.enableRewardMobileEmulation = enableRewardMobileEmulation;
+globalThis.disableRewardMobileEmulation = disableRewardMobileEmulation;
 
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
@@ -2544,7 +2605,13 @@ async function autoClickRewards() {
                 if (!key) continue;
                 if (seen.has(key)) continue;
                 seen.add(key);
-                items.push({ key, href });
+                const isRestored = Boolean(
+                  (typeof card?.closest === "function" && card.closest("#ext-restored-dailyset")) ||
+                  card?.id === "ext-restored-dailyset" ||
+                  (typeof card?.getAttribute === "function" && card.getAttribute("data-reward-card-name")) ||
+                  (typeof card?.querySelector === "function" && card.querySelector("[data-reward-card-name]"))
+                );
+                items.push({ key, href, isRestored });
               }
 
               return items;
@@ -4224,91 +4291,134 @@ async function autoClickRewards() {
         });
 
         const childBaselineIds = await getCurrentTabIdSet();
-        const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
-        const structuredClickResult = clickResult && typeof clickResult === "object"
-          ? clickResult
-          : { clicked: !!clickResult, attempted: !!clickResult, domChanged: false, href: "" };
-        const wasClicked = structuredClickResult.clicked === true;
-        const clickAttempted = structuredClickResult.attempted === true;
-        const domChanged = structuredClickResult.domChanged === true;
-        const resultHref = structuredClickResult.href || "";
-        let manualFallbackAttempted = false;
-        let usedManualFallback = false;
-
-        await sleepWithinDeadline(REWARDS_SETTLE_MS);
-
-        // Collect only child tabs spawned by this card click. A card can open
-        // more than one tab, and the user may close one manually while we run.
-        const newTabIds = await collectNewChildTabIds(
-          childBaselineIds,
-          `reward card ${clickCount}`,
+        const isRestoredDailySet = Boolean(
+          card.isRestored ||
+          (card.key && /Global_DailySet|ext-restored/i.test(card.key)) ||
+          targetSectionIds.includes("ext-restored-dailyset")
         );
 
-        if (
-          !timedOut() &&
-          newTabIds.length === 0 &&
-          !domChanged &&
-          (card.href || resultHref)
-        ) {
-          let fullHref = resultHref || card.href;
-          if (fullHref.startsWith("/")) {
-            fullHref = "https://rewards.bing.com" + fullHref;
-          }
-          if (fullHref.startsWith("http")) {
-            manualFallbackAttempted = true;
-            await appendDebugLog("warn", "rewards", "Reward card did not open a child tab, falling back to manual open", {
-              url: fullHref,
-              clicked: wasClicked,
-              domChanged,
-            });
-            console.log("[Rewards] Reward card did not open a child tab, falling back to manual open: " + fullHref);
-            try {
-              const fallbackTab = await chrome.tabs.create({
-                url: fullHref,
-                active: true,
-                windowId,
-                openerTabId: tab.id,
-              });
-              await trackFallbackChildTab(fallbackTab, newTabIds);
-              usedManualFallback = true;
-              await waitForTabComplete(
-                fallbackTab.id,
-                Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
-              );
-            } catch (e) {
-              console.warn("[Rewards] Fallback tab creation failed:", e);
-            }
-          }
+        if (isRestoredDailySet) {
+          await enableRewardMobileEmulation();
         }
 
-        // Scroll like a human on each child tab so Bing registers the visit.
-        for (const childTabId of newTabIds) {
-          if (timedOut()) break;
-          try {
-            await chrome.tabs.update(childTabId, { active: true });
-            await waitForTabComplete(
-              childTabId,
-              Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
-            );
-            const quizResult = await awaitWithinDeadline(
-              handleRewardChildTab(childTabId),
-              { handled: false, completed: false, reason: "deadline" },
-            );
-            if (quizResult?.handled) {
-              await appendDebugLog("info", "rewards", "Handled reward quiz child tab", {
-                completed: quizResult.completed,
-                clicks: quizResult.clicks,
-                reason: quizResult.reason,
-                diagnostics: quizResult.diagnostics,
+        let structuredClickResult;
+        let wasClicked = false;
+        let clickAttempted = false;
+        let domChanged = false;
+        let resultHref = "";
+        let manualFallbackAttempted = false;
+        let usedManualFallback = false;
+        const newTabIds = [];
+
+        try {
+          const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
+          structuredClickResult = clickResult && typeof clickResult === "object"
+            ? clickResult
+            : { clicked: !!clickResult, attempted: !!clickResult, domChanged: false, href: "" };
+          wasClicked = structuredClickResult.clicked === true;
+          clickAttempted = structuredClickResult.attempted === true;
+          domChanged = structuredClickResult.domChanged === true;
+          resultHref = structuredClickResult.href || "";
+
+          await sleepWithinDeadline(REWARDS_SETTLE_MS);
+
+          // Collect only child tabs spawned by this card click.
+          const collectedIds = await collectNewChildTabIds(
+            childBaselineIds,
+            `reward card ${clickCount}`,
+          );
+          newTabIds.push(...collectedIds);
+
+          if (
+            !timedOut() &&
+            newTabIds.length === 0 &&
+            !domChanged &&
+            (card.href || resultHref)
+          ) {
+            let fullHref = resultHref || card.href;
+            if (fullHref.startsWith("/")) {
+              fullHref = "https://rewards.bing.com" + fullHref;
+            }
+            if (fullHref.startsWith("http")) {
+              manualFallbackAttempted = true;
+              await appendDebugLog("warn", "rewards", "Reward card did not open a child tab, falling back to manual open", {
+                url: fullHref,
+                clicked: wasClicked,
+                domChanged,
               });
-              await sleepWithinDeadline(2000);
-            } else if (!timedOut()) {
-              await awaitWithinDeadline(humanScrollOnTab(childTabId), undefined);
-              if (!timedOut()) {
-                await waitForRewardSearchCredit(childTabId, Math.min(12000, remainingMs()));
+              console.log("[Rewards] Reward card did not open a child tab, falling back to manual open: " + fullHref);
+              try {
+                const fallbackTab = await chrome.tabs.create({
+                  url: fullHref,
+                  active: true,
+                  windowId,
+                  openerTabId: tab.id,
+                });
+                await trackFallbackChildTab(fallbackTab, newTabIds);
+                usedManualFallback = true;
+                await waitForTabComplete(
+                  fallbackTab.id,
+                  Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
+                );
+              } catch (e) {
+                console.warn("[Rewards] Fallback tab creation failed:", e);
               }
             }
-          } catch { }
+          }
+
+          // Scroll like a human on each child tab so Bing registers the visit.
+          for (const childTabId of newTabIds) {
+            if (timedOut()) break;
+            try {
+              await chrome.tabs.update(childTabId, { active: true });
+              await waitForTabComplete(
+                childTabId,
+                Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
+              );
+
+              if (isRestoredDailySet) {
+                try {
+                  await chrome.scripting.executeScript({
+                    target: { tabId: childTabId },
+                    world: "MAIN",
+                    args: [REWARD_MOBILE_USER_AGENT],
+                    func: (ua) => {
+                      try {
+                        Object.defineProperty(navigator, "userAgent", { get: () => ua, configurable: true });
+                        if (navigator.userAgentData) {
+                          Object.defineProperty(navigator.userAgentData, "mobile", { get: () => true, configurable: true });
+                          Object.defineProperty(navigator.userAgentData, "platform", { get: () => "Android", configurable: true });
+                        }
+                      } catch {}
+                    },
+                  });
+                } catch {}
+              }
+
+              const quizResult = await awaitWithinDeadline(
+                handleRewardChildTab(childTabId),
+                { handled: false, completed: false, reason: "deadline" },
+              );
+              if (quizResult?.handled) {
+                await appendDebugLog("info", "rewards", "Handled reward quiz child tab", {
+                  completed: quizResult.completed,
+                  clicks: quizResult.clicks,
+                  reason: quizResult.reason,
+                  diagnostics: quizResult.diagnostics,
+                });
+                await sleepWithinDeadline(2000);
+              } else if (!timedOut()) {
+                await awaitWithinDeadline(humanScrollOnTab(childTabId), undefined);
+                if (!timedOut()) {
+                  await waitForRewardSearchCredit(childTabId, Math.min(8000, remainingMs()));
+                }
+              }
+            } catch { }
+          }
+        } finally {
+          if (isRestoredDailySet) {
+            await disableRewardMobileEmulation();
+          }
         }
 
         const cardCleanupResult = newTabIds.length
@@ -4333,6 +4443,13 @@ async function autoClickRewards() {
               },
             });
           } catch { }
+        }
+
+        // Revalidate server state if restored daily set was processed
+        if (isRestoredDailySet && (newTabIds.length > 0 || domChanged || wasClicked)) {
+          try {
+            await fetchAndRestoreDailySet(tab.id, { forceFresh: true });
+          } catch {}
         }
 
         const noEffect = !effectiveHref && newTabIds.length === 0 && !domChanged;

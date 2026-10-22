@@ -12,7 +12,8 @@
     "scripting",
     "sidePanel",
     "identity",
-    "identity.email"
+    "identity.email",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
     "https://www.bing.com/*",

@@ -239,6 +239,27 @@ Nhóm đã sử dụng `gemini2api` với mô hình `gemini-4-argon` để rà s
 3. **Giới hạn số vòng lặp trả lời quiz:**
    - Giảm số chu kỳ quiz từ 20 xuống tối đa 12 (giới hạn tối đa 8 clicks, 1500ms delay, ưu tiên các phương án chưa click) giúp thẻ quiz hoàn thành trong dưới 10 giây, loại bỏ hoàn toàn nguy cơ chạm ngưỡng timeout 240s.
 
+### 4.4. Cơ chế Mobile Emulation & Chống cắt cụt URL cho thẻ Daily Set trên Profile 1
+1. **Nguyên nhân cốt lõi khiến thẻ Profile 1 không được Microsoft Rewards xác nhận:**
+   - **Lỗi cắt cụt URL (Attribute Truncation):** URL thẻ 2 chứa tham số có dấu ngoặc kép `filters=sid:"<uuid>"`. Khi nội suy thô vào chuỗi template `href="${card.destinationUrl}"`, dấu ngoặc kép đóng sớm thuộc tính `href`, làm mất hoàn toàn `sid` và biến thẻ thành truy vấn lỗi.
+   - **Xác thực telemetry chuyến bay `vsstreak`:** Tài khoản trên Profile 1 nằm trong nhóm thử nghiệm `vsstreak` (chỉ cộng điểm Daily Set khi phát sinh từ Bing Mobile App / Edge Mobile). Nếu tab con gửi User-Agent Linux Desktop cùng header `Sec-CH-UA-Mobile: ?0`, backend Microsoft Rewards sẽ từ chối ghi nhận điểm.
+   - **Cạn kiệt quỹ thời gian (Timeout Starvation):** Tổng thời gian quét và click thẻ trước đây bị giới hạn ở 240s, khiến thẻ số 3 (quiz) thường xuyên bị đóng sau chưa đầy 1 giây vì hết hạn deadline.
+
+2. **Giải pháp kỹ thuật tối thiểu & dứt điểm (Ponytail mode):**
+   - **Chuẩn hóa URL & Escape HTML an toàn:** Sử dụng hàm `escapeAttr` và thay thế toàn bộ dấu ngoặc kép trong `destinationUrl` thành `%22` (`filters=sid:%22<uuid>%22`), đồng nhất tuyệt đối với định dạng URL gốc của Microsoft trên Profile Default.
+   - **Quy tắc phiên MV3 `declarativeNetRequest` (DNR Session Rules):**
+     - Thêm quyền `"declarativeNetRequest"` vào `manifest.json`.
+     - Kích hoạt quy tắc DNR ID `9021` (ưu tiên mức 2) áp dụng cho `||bing.com/search?*` khi xử lý thẻ Daily Set phục hồi:
+       - `User-Agent`: `Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.0.0`
+       - `Sec-CH-UA-Mobile`: `?1`
+       - `Sec-CH-UA-Platform`: `"Android"`
+       - `Sec-CH-UA`: `"Chromium";v="130", "Microsoft Edge";v="130", "Not?A_Brand";v="99"`
+     - Bọc toàn bộ quy trình mở tab và xử lý thẻ trong khối `try ... finally` để chắc chắn gỡ bỏ quy tắc DNR ngay khi tab con đóng lại.
+   - **Giả lập Navigator Client-side:** Bổ sung `navigator.userAgentData.mobile = true` và `navigator.userAgentData.platform = "Android"` vào tab con bằng `chrome.scripting.executeScript`.
+   - **Tái đối soát tức thì từ máy chủ (`panelflyout` revalidation):** Sau khi tab con hoàn thành, tự động gọi `fetchAndRestoreDailySet(tab.id, { forceFresh: true })` để cập nhật trạng thái `complete: true` từ server Microsoft Rewards vào DOM và cache.
+   - **Điều chỉnh ngân sách thời gian:** Tăng `REWARD_URL_TIMEOUT_MS` lên 360000ms (6 phút) và tối ưu thời gian chờ điểm tìm kiếm xuống 8s để đảm bảo toàn bộ thẻ và quiz hoàn thành trọn vẹn.
+   - **Bảo toàn Profile Default:** Profile Default có `#dailyset` gốc từ máy chủ nên hoàn toàn không kích hoạt DNR hay thẻ phục hồi, giữ nguyên tính ổn định 100% không hồi quy.
+
 ---
 
 ## 5. Đánh giá kiến trúc với Gemini 4 Argon & Kết quả kiểm thử
@@ -246,9 +267,9 @@ Nhóm đã sử dụng `gemini2api` với mô hình `gemini-4-argon` để rà s
 ### 5.1. Kết quả review từ Gemini 4 Argon (gemini2api)
 - **Xác nhận sửa lỗi False-Positive:** Gemini 4 Argon đánh giá việc loại trừ `readyCardInfo.cardContainer` và thu hẹp phạm vi tìm kiếm nút claim trong dialog là giải pháp dứt điểm, ngăn chặn việc click nhầm footer card.
 - **Tương thích tuyệt đối 2 Profile:** Bộ lọc `if (document.getElementById("dailyset")) return false;` đảm bảo Profile Default hoàn toàn sử dụng mã nguồn React gốc của Microsoft, không bị can thiệp DOM hay rò rỉ bộ nhớ; trong khi Profile 1 được phục hồi Daily Set và huy hiệu chuỗi một cách bền vững.
-- **Deep Event Simulation:** Chuỗi mô phỏng sự kiện chuột/pointer 11 bước trong `clickElement` và `dispatchRewardPress` tương thích hoàn hảo với React-Aria synthetic event listeners.
+- **Đồng thuận giải pháp Mobile Emulation:** Gemini 4 Argon khẳng định việc kết hợp DNR session rules cho `||bing.com/search?*` và bảo vệ thuộc tính HTML bằng DOM methods/escaping là phương án chuẩn nhất trong MV3 để thỏa mãn telemetry di động của Microsoft Rewards mà không tạo banner cảnh báo của Chrome debugger.
 
 ### 5.2. Kết quả kiểm thử tự động
-- **Node.js test suite:** 24/24 unit tests vượt qua thành công (100% pass).
+- **Node.js test suite:** 24/24 unit tests vượt qua thành công (100% pass), bao gồm test chuẩn hóa URL chứa ngoặc kép và nhận diện `data-ext-completed="true"`.
 - **Edge / Chrome Browser tests:** Toàn bộ test hydrate, live HTML card scanning và extension smoke test đều đạt chuẩn PASS.
 - **Syntax & Manifest check:** Đạt chuẩn hợp lệ không có bất kỳ lỗi cú pháp nào.
