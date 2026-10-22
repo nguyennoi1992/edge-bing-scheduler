@@ -29,6 +29,7 @@
     {
       "matches": ["https://rewards.bing.com/*"],
       "js": ["reward-scanner-helpers.js"],
+      "world": "MAIN",
       "run_at": "document_end"
     }
   ],

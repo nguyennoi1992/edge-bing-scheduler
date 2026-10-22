@@ -814,12 +814,16 @@ test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak
     <script>
     (function () {
         window.flyoutViewModel = {
+          "userId": "547666DBDCF7B3759A1D9AA3FFFFFFFF",
           "userInfo": { "isRewardsUser": true, "balance": 3030 },
           "flyoutResult": {
             "dailySetPromotions": {
               "10/20/2026": [
                 {
                   "name": "Global_DailySet_20261020_Child1",
+                  "offerId": "Global_DailySet_20261020_Child1",
+                  "activityType": "bingredirect",
+                  "hash": "hash_child_1",
                   "title": "Tokyo Rực Rỡ Đầu Thu",
                   "description": "Hương vị theo mùa & khu vườn",
                   "pointProgressMax": 10,
@@ -830,6 +834,9 @@ test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak
                 },
                 {
                   "name": "Global_DailySet_20261020_Child2",
+                  "offerId": "Global_DailySet_20261020_Child2",
+                  "activityType": "bingredirect",
+                  "hash": "hash_child_2",
                   "title": "Cairns Reef Springtime",
                   "description": "Lặn biển",
                   "pointProgressMax": 10,
@@ -856,12 +863,18 @@ test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak
   const parsed = extractDailySetFromFlyoutHtml(sampleFlyoutHtml);
   assert.ok(parsed, "should return parsed object");
   assert.equal(parsed.streakDays, 132);
+  assert.equal(parsed.userId, "547666DBDCF7B3759A1D9AA3FFFFFFFF");
   assert.equal(parsed.cards.length, 2);
   assert.equal(parsed.cards[0].title, "Tokyo Rực Rỡ Đầu Thu");
+  assert.equal(parsed.cards[0].offerId, "Global_DailySet_20261020_Child1");
+  assert.equal(parsed.cards[0].hash, "hash_child_1");
+  assert.equal(parsed.cards[0].activityType, "bingredirect");
   assert.equal(parsed.cards[0].points, 10);
   assert.equal(parsed.cards[0].complete, false);
   assert.equal(parsed.cards[0].destinationUrl, "https://www.bing.com/search?q=Tokyo");
   assert.equal(parsed.cards[1].complete, true);
+  assert.equal(parsed.cards[1].offerId, "Global_DailySet_20261020_Child2");
+  assert.equal(parsed.cards[1].hash, "hash_child_2");
   assert.equal(parsed.cards[1].destinationUrl, "https://www.bing.com/search?q=Cairns&filters=sid:%22a6b4-uuid%22&rnoreward=1");
 
   // Safety checks

@@ -383,6 +383,11 @@ export function extractDailySetFromFlyoutHtml(html) {
   const streakDays =
     streakPromo.activityProgress ||
     Number(streakPromo.attributes?.activity_progress || 0);
+  const userId =
+    vm.userId ||
+    vm.flyoutResult?.userStatus?.memberId ||
+    vm.flyoutResult?.rewardsSessionData?.UserId ||
+    "";
 
   const today = new Date();
   const m = today.getMonth() + 1;
@@ -405,8 +410,12 @@ export function extractDailySetFromFlyoutHtml(html) {
 
   return {
     streakDays,
+    userId,
     cards: cards.map((c) => ({
       name: c.name || "",
+      offerId: c.offerId || c.name || "",
+      activityType: c.activityType || "bingredirect",
+      hash: c.hash || c.attributes?.hash || "",
       title: c.title || "",
       description: c.description || "",
       points: c.pointProgressMax || 10,

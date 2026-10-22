@@ -273,3 +273,60 @@ Nhóm đã sử dụng `gemini2api` với mô hình `gemini-4-argon` để rà s
 - **Node.js test suite:** 24/24 unit tests vượt qua thành công (100% pass), bao gồm test chuẩn hóa URL chứa ngoặc kép và nhận diện `data-ext-completed="true"`.
 - **Edge / Chrome Browser tests:** Toàn bộ test hydrate, live HTML card scanning và extension smoke test đều đạt chuẩn PASS.
 - **Syntax & Manifest check:** Đạt chuẩn hợp lệ không có bất kỳ lỗi cú pháp nào.
+
+---
+
+## 9. Cập Nhật Giải Quyết Triệt Để Hoàn Thành Thẻ (Card Completion Resolution - 22/10/2026)
+
+### 9.1. Hiện tượng & Vấn đề thực tế
+Mặc dù thẻ Daily Set đã được hiển thị đầy đủ trên dashboard của Profile 1 (`#ext-restored-dailyset`), khi người dùng hoặc bot tự động click vào các thẻ này, server Microsoft Rewards vẫn báo `complete: false` và không tăng điểm, trong khi Profile Default hoạt động và xác nhận hoàn thành bình thường.
+
+### 9.2. Phân tích nguyên nhân cốt lõi (Root Cause)
+1. **Sự khác biệt giữa Desktop SERP và Modern Flyout Endpoint:**
+   - Khi click thẻ trên desktop thông thường, link mở ra `https://www.bing.com/search?...`.
+   - Trang kết quả tìm kiếm gửi request: `POST https://www.bing.com/rewardsapp/reportActivity`. Đối với tài khoản Profile 1 nằm trong flight `vsstreak`, request này bị server trả về: `"IsMobileClient": false` và điểm không được cộng.
+2. **Cơ chế ghi nhận của Bing Mobile / Panel Flyout:**
+   - Trong Panel Flyout (`https://www.bing.com/rewards/panelflyout`) và Bing Mobile App, khi click card, client không phụ thuộc vào `rewardsapp/reportActivity` mà gọi endpoint hiện đại:
+     ```http
+     POST https://www.bing.com/msrewards/api/v1/reportactivity
+     Content-Type: text/plain;charset=UTF-8
+
+     {
+       "ActivityType": "bingredirect",
+       "ActivitySubType": "",
+       "OfferId": "<offer_id>",
+       "Channel": "BingFlyout",
+       "PartnerId": "BingRewards",
+       "UserId": "<user_id>",
+       "AuthKey": "<hash_key>",
+       "ActivityCount": 1
+     }
+     ```
+   - Server lập tức trả về `{"OfferComplete":false,"EarnedCredits":10,"ActivityComplete":true,"Balance":{...},"ErrorDetail":{"ErrorCode":0,"Message":"I_SUCCESS"}}` và card lập tức được xác nhận `complete: true`.
+
+### 9.3. Triển khai khắc phục
+1. **`reward-dom-helpers.js` (`extractDailySetFromFlyoutHtml`):**
+   - Trích xuất `userId` và cho từng thẻ: `offerId`, `hash` (AuthKey), `activityType`.
+2. **`reward-scanner-helpers.js` (`injectRestoredDailySet`):**
+   - Thêm các thuộc tính data: `data-offer-id`, `data-auth-key`, `data-activity-type`, `data-user-id` vào thẻ HTML của `#ext-restored-dailyset`.
+   - Cập nhật guard để không bỏ sót định nghĩa hàm `ensurePersistentDailySet`.
+3. **`manifest.json`:**
+   - Bổ sung `"world": "MAIN"` cho `content_scripts` `reward-scanner-helpers.js` để hàm tiện ích luôn có sẵn trong MAIN execution world.
+4. **`background.js`:**
+   - Trong `enableRewardMobileEmulation`: Cập nhật `urlFilter` thành `"||bing.com/*"` để mọi request tài nguyên và API trên Bing đều nhận header mobile thích hợp.
+   - Trong `autoClickRewards`: Khi xử lý child tab của thẻ Daily Set phục hồi, injected script thực hiện gọi `fetch("https://www.bing.com/msrewards/api/v1/reportactivity", ...)` với `credentials: "include"` ngay trong origin `https://www.bing.com` của child tab.
+   - Trong `chrome.tabs.onUpdated`: Bổ sung cơ chế tự động ghi nhận cho trường hợp người dùng click thủ công thẻ Daily Set trên trình duyệt.
+
+### 9.4. Bằng chứng kiểm chứng thực tế (Live Verification Evidence)
+Kiểm tra trực tiếp trên virtual display (`run-with-virtual-display.sh`) với cả 2 Profile:
+- **Profile 1:**
+  - Card 1 (`Upcoming events near me`): `complete: true`, `points: 10/10`
+  - Card 2 (`Los Angeles Sunny October`): `complete: true`, `points: 10/10`
+  - Card 3 (`Ang Lee Epic?`): `complete: true`, `points: 10/10`
+  - Số điểm tích lũy: Tăng từ 3,183 -> 3,216 điểm.
+  - Streak: Duy trì 132 ngày.
+- **Profile Default:**
+  - Cả 3 thẻ Daily Set hoàn thành 3/3, số điểm 1,137, streak 313 ngày.
+- **Automated Test Suite:**
+  - 24/24 Node tests pass.
+  - Toàn bộ browser test trên Microsoft Edge pass.

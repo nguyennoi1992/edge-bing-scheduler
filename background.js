@@ -784,7 +784,7 @@ async function enableRewardMobileEmulation() {
             ],
           },
           condition: {
-            urlFilter: "||bing.com/search?*",
+            urlFilter: "||bing.com/*",
             resourceTypes: [
               "main_frame",
               "sub_frame",
@@ -2611,7 +2611,11 @@ async function autoClickRewards() {
                   (typeof card?.getAttribute === "function" && card.getAttribute("data-reward-card-name")) ||
                   (typeof card?.querySelector === "function" && card.querySelector("[data-reward-card-name]"))
                 );
-                items.push({ key, href, isRestored });
+                const offerId = (typeof card?.getAttribute === "function" && card.getAttribute("data-offer-id")) || "";
+                const authKey = (typeof card?.getAttribute === "function" && card.getAttribute("data-auth-key")) || "";
+                const activityType = (typeof card?.getAttribute === "function" && card.getAttribute("data-activity-type")) || "";
+                const userId = (typeof card?.getAttribute === "function" && card.getAttribute("data-user-id")) || "";
+                items.push({ key, href, isRestored, offerId, authKey, activityType, userId });
               }
 
               return items;
@@ -4378,11 +4382,24 @@ async function autoClickRewards() {
 
               if (isRestoredDailySet) {
                 try {
+                  const cached = await chrome.storage.local.get(["cachedDailySetData"]);
+                  const matching = cached?.cachedDailySetData?.cards?.find((c) =>
+                    (card.offerId && c.offerId === card.offerId) ||
+                    (card.key && c.name && card.key.includes(c.name)) ||
+                    (card.href && c.destinationUrl && (card.href.includes(c.name) || c.destinationUrl.includes(card.href)))
+                  );
+                  const reportPayload = {
+                    activityType: card.activityType || matching?.activityType || "bingredirect",
+                    offerId: card.offerId || matching?.offerId || matching?.name || "",
+                    authKey: card.authKey || matching?.hash || "",
+                    userId: card.userId || cached?.cachedDailySetData?.userId || "",
+                  };
+
                   await chrome.scripting.executeScript({
                     target: { tabId: childTabId },
                     world: "MAIN",
-                    args: [REWARD_MOBILE_USER_AGENT],
-                    func: (ua) => {
+                    args: [REWARD_MOBILE_USER_AGENT, reportPayload],
+                    func: async (ua, payload) => {
                       try {
                         Object.defineProperty(navigator, "userAgent", { get: () => ua, configurable: true });
                         if (navigator.userAgentData) {
@@ -4390,6 +4407,26 @@ async function autoClickRewards() {
                           Object.defineProperty(navigator.userAgentData, "platform", { get: () => "Android", configurable: true });
                         }
                       } catch {}
+
+                      if (payload && payload.offerId && payload.authKey) {
+                        try {
+                          await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+                            method: "POST",
+                            headers: { "Content-Type": "text/plain;charset=UTF-8" },
+                            credentials: "include",
+                            body: JSON.stringify({
+                              ActivityType: payload.activityType || "bingredirect",
+                              ActivitySubType: "",
+                              OfferId: payload.offerId,
+                              Channel: "BingFlyout",
+                              PartnerId: "BingRewards",
+                              UserId: payload.userId || "",
+                              AuthKey: payload.authKey,
+                              ActivityCount: 1,
+                            }),
+                          });
+                        } catch {}
+                      }
                     },
                   });
                 } catch {}
@@ -5355,12 +5392,59 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const url = tab?.url || changeInfo?.url;
-  if (!url || !/rewards\.bing\.com\/dashboard/i.test(url)) return;
+  if (!url) return;
 
-  try {
-    await fetchAndRestoreDailySet(tabId);
-  } catch (err) {
-    console.warn("[Rewards] tabs.onUpdated daily set restore error:", err);
+  if (/rewards\.bing\.com\/dashboard/i.test(url)) {
+    try {
+      await fetchAndRestoreDailySet(tabId);
+    } catch (err) {
+      console.warn("[Rewards] tabs.onUpdated daily set restore error:", err);
+    }
+  }
+
+  // Also support manual clicks by user on restored Daily Set search tabs
+  if (changeInfo.status === "complete" && /bing\.com\/search\?/i.test(url) && /(?:Global_DailySet|REWARDSQUIZ_DailySet|sid:)/i.test(url)) {
+    try {
+      const cached = await chrome.storage.local.get(["cachedDailySetData"]);
+      const dailySet = cached?.cachedDailySetData;
+      if (dailySet && Array.isArray(dailySet.cards)) {
+        const matchingCard = dailySet.cards.find(
+          (c) => c.hash && (url.includes(c.name) || (c.offerId && url.includes(c.offerId)))
+        );
+        if (matchingCard && !matchingCard.complete) {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            args: [{
+              activityType: matchingCard.activityType || "bingredirect",
+              offerId: matchingCard.offerId || matchingCard.name,
+              authKey: matchingCard.hash,
+              userId: dailySet.userId || "",
+            }],
+            func: async (payload) => {
+              if (!payload.offerId || !payload.authKey) return null;
+              try {
+                return await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+                  method: "POST",
+                  headers: { "Content-Type": "text/plain;charset=UTF-8" },
+                  credentials: "include",
+                  body: JSON.stringify({
+                    ActivityType: payload.activityType || "bingredirect",
+                    ActivitySubType: "",
+                    OfferId: payload.offerId,
+                    Channel: "BingFlyout",
+                    PartnerId: "BingRewards",
+                    UserId: payload.userId || "",
+                    AuthKey: payload.authKey,
+                    ActivityCount: 1,
+                  }),
+                }).then((r) => r.json());
+              } catch {}
+            },
+          });
+        }
+      }
+    } catch {}
   }
 });
 

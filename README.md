@@ -104,6 +104,21 @@ Open **Options** page:
 
 ---
 
+## 📚 Documentation & Technical Guides
+
+Tất cả tài liệu kỹ thuật, kiến trúc và quy trình kiểm thử được tổ chức trong thư mục `docs/`:
+
+* 📖 [**Multi-Profile Testing & Verification Guide**](docs/MULTI_PROFILE_TESTING_AND_VERIFICATION_GUIDE.md)  
+  Quy trình chuẩn rà soát, sao chép profile an toàn, chạy kiểm thử qua virtual display (`Xvfb`), xác nhận hoàn thành thẻ (`complete: true`) trên backend Microsoft Rewards.
+* 🔍 [**Investigation & Fix: Flight `vsstreak` & Card Completion**](docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md)  
+  Báo cáo chuyên sâu về flighting `vsstreak`, cơ chế phục hồi `#ext-restored-dailyset`, endpoint `/msrewards/api/v1/reportactivity` và kiểm chứng đa profile.
+* ⚡ [**Rewards Hydration & Scanning Optimization**](docs/optimization-2026-10-12-rewards-hydration-scheduler.md)  
+  Kiến trúc quét DOM, phát hiện trạng thái hydration và phân loại section an toàn.
+* 🛡️ [**Edge Rewards Scripting Protected Page Handling**](docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md)  
+  Xử lý ngoại lệ chính sách bảo vệ trang của Microsoft Edge.
+
+---
+
 ## Browser Tests
 
 Run the complete Node, syntax, manifest, and Microsoft Edge test suite:

@@ -1,7 +1,8 @@
 (function installRewardScannerHelpers(global) {
   if (
     typeof global.findRewardCardRoots === "function" &&
-    typeof global.expandRewardSection === "function"
+    typeof global.expandRewardSection === "function" &&
+    typeof global.ensurePersistentDailySet === "function"
   ) {
     return;
   }
@@ -218,12 +219,16 @@
           const safeDesc = escapeAttr(card.description || "");
           const safeImg = escapeAttr(card.imageUrl || "");
           const safeName = escapeAttr(card.name || "");
+          const safeOfferId = escapeAttr(card.offerId || card.name || "");
+          const safeAuthKey = escapeAttr(card.hash || "");
+          const safeActivityType = escapeAttr(card.activityType || "bingredirect");
+          const safeUserId = escapeAttr(dailySetData.userId || "");
           const checkBadge = isDone
             ? `<div class="flex size-5 shrink-0 items-center justify-center rounded-full bg-statusSuccessRest text-fgOnStatusSuccess" style="background-color:#107c41;color:#fff;"><svg class="size-3.5 text-statusSuccessTintFg mee-icon-CheckMark" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" /></svg></div>`
             : `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="size-4 shrink-0 text-fgCtrlNeutralSecondaryRest" style="width:16px;height:16px;"><path fill="currentColor" d="M6.25 4.5A1.75 1.75 0 0 0 4.5 6.25v11.5c0 .966.783 1.75 1.75 1.75h11.5a1.75 1.75 0 0 0 1.75-1.75v-4a.75.75 0 0 1 1.5 0v4A3.25 3.25 0 0 1 17.75 21H6.25A3.25 3.25 0 0 1 3 17.75V6.25A3.25 3.25 0 0 1 6.25 3h4a.75.75 0 0 1 0 1.5zM13 3.75a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-1.5 0V5.56l-5.22 5.22a.75.75 0 0 1-1.06-1.06l5.22-5.22h-4.69a.75.75 0 0 1-.75-.75"></path></svg>`;
 
           return `
-          <a class="group/ctrl cursor-pointer data-disabled:cursor-default outline-0 outline-ctrlFocusOuterStroke focus-visible:outline-ctrlFocusOuterStrokeWidth rounded-cornerCardDefault" data-rac="" href="${safeUrl}" target="_blank" rel="noopener noreferrer" tabindex="0" data-react-aria-pressable="true" data-reward-card-name="${safeName}" ${isDone ? 'data-ext-completed="true"' : ""}>
+          <a class="group/ctrl cursor-pointer data-disabled:cursor-default outline-0 outline-ctrlFocusOuterStroke focus-visible:outline-ctrlFocusOuterStrokeWidth rounded-cornerCardDefault" data-rac="" href="${safeUrl}" target="_blank" rel="noopener noreferrer" tabindex="0" data-react-aria-pressable="true" data-reward-card-name="${safeName}" data-offer-id="${safeOfferId}" data-auth-key="${safeAuthKey}" data-activity-type="${safeActivityType}" data-user-id="${safeUserId}" ${isDone ? 'data-ext-completed="true"' : ""}>
             <div class="flex size-full gap-gapBetweenContentSmall p-paddingCardDefault overflow-hidden rounded-cornerCardDefault bg-bgCardOnPrimaryDefaultRest border border-strokeCardOnPrimaryRest cursor-pointer hover:bg-bgCardOnPrimaryDefaultHover active:bg-bgCardOnPrimaryDefaultPressed hover:[&_img]:scale-110 hover:border-strokeCardOnPrimaryHover active:border-strokeCardOnPrimaryPressed shadow-shadowCardRest hover:shadow-shadowCardHover active:shadow-shadowCardPressed flex-row" style="min-height:92px;">
               <div class="relative shrink-0 overflow-hidden rounded-cornerCardNestedDefaultOutside bg-bgCtrlNeutralDisabled aspect-square h-24.5" style="width:96px;height:96px;">
                 <img alt="${safeTitle}" class="text-transparent absolute inset-0 h-full w-full object-cover transition-transform duration-200" src="${safeImg}">
