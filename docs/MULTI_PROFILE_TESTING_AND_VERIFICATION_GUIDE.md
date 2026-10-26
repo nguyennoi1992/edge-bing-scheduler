@@ -2,7 +2,7 @@
 
 > **Tài liệu hướng dẫn chuẩn vận hành cho các phiên làm việc (sessions) tiếp theo**  
 > Dự án: `edge-bing-scheduler` (Bing Search & Microsoft Rewards Extension)  
-> Cập nhật lần cuối: 22/10/2026
+> Cập nhật lần cuối: 26/10/2026
 
 ---
 
@@ -24,57 +24,31 @@ Hệ thống hỗ trợ 2 profile Chrome chính với cơ chế hiển thị và
 ## 2. Quy Tắc Bắt Buộc Khi Chạy Kiểm Thử (Strict Operational Rules)
 
 1. **Bảo vệ phiên làm việc của người dùng (Không chiếm Display):**
-   - **Tuyệt đối không** mở browser trực tiếp lên màn hình desktop chính (`DISPLAY=:0` hoặc default display).
+   - **Không** mở browser trực tiếp lên màn hình desktop chính (`DISPLAY=:0` hoặc default display).
    - **Bắt buộc** sử dụng script virtual display (`Xvfb`) tại:
      ```bash
      /u01/workspace/FacebookBot/scripts/run-with-virtual-display.sh env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_CURRENT_DESKTOP=GNOME node <script.mjs>
      ```
 2. **Bảo vệ dữ liệu Profile thật (Tránh xung đột Chrome Lock & Corrupt Data):**
    - Khi Chrome đang chạy trên máy của user, thư mục `~/.config/google-chrome` bị khóa (lock files: `SingletonLock`, `SingletonCookie`, `SingletonSocket`).
-   - Sao chép các file cần thiết sang thư mục tạm trước khi test:
-     - `Local State`
-     - Profile directory: `Preferences`, `Cookies`, `Network Persistent State`, `Local Storage`, `Local Extension Settings`.
-   - Các thư mục test chuẩn:
-     - Profile 1: `/tmp/chrome-test-p1`
-     - Profile Default: `/tmp/chrome-test-default`
+   - **Quy trình chuẩn hiện tại (Khuyến nghị):** Script `tests/verify-dual-profile-live.mjs` tự động tạo thư mục tạm cô lập riêng biệt (`mkdtempSync`), sao lưu database Cookie qua SQLite read-only (`sqlite3 src.backup(dst)` với URI `pathlib.Path(path).as_uri() + '?mode=ro'`) để tránh tranh chấp lock và mã hóa ký tự đặc biệt an toàn, tắt Chrome Sync ở cấp trình duyệt bằng cờ `--disable-sync`, tắt bộ lập lịch của extension trong bản clone bằng `chrome.storage.sync.set({ enabled: false })`, sử dụng cổng CDP ngẫu nhiên (`--remote-debugging-port=0`), và tự động dọn dẹp thư mục tạm khi kết thúc.
+   - **Tránh:** Sử dụng đường dẫn cố định, ghi đè thư mục `/tmp/chrome-test-*` dùng chung, hoặc gọi lệnh `kill -9` / `pkill` bừa bãi làm tắt phiên làm việc thật của người dùng.
 3. **Cài đặt Extension ở chế độ Developer:**
    - Extension được cài đặt unpacked trực tiếp từ thư mục dự án `/u01/tools/edge-bing-scheduler`.
    - Mọi sửa đổi file mã nguồn trong repo có hiệu lực trực tiếp khi extension worker reload.
+   - **Yêu cầu bắt buộc khi test:** Phải reload extension (`chrome.runtime.reload()`) và đối soát hash SHA256 của file chạy trên extension so với file trên ổ đĩa trước khi ghi nhận kết quả. Script `tests/verify-dual-profile-live.mjs` đã tích hợp sẵn bước kiểm chứng này.
 
 ---
 
-## 3. Cách Sao Chép Profile Kiểm Thử (Profile Test Setup Script)
+## 3. Cơ Chế Sao Chép Profile Tự Động (Profile Cloning Mechanism)
 
-Sử dụng lệnh Python nhanh để chuẩn bị môi trường test cô lập:
+Trước đây, quy trình kiểm thử sử dụng script Python sao chép thủ công vào các thư mục cố định (`/tmp/chrome-test-p1`, `/tmp/chrome-test-default`), dễ dẫn đến ghi đè dữ liệu hoặc xung đột lock file. Các đoạn mã thủ công này đã bị xóa để tránh rủi ro vận hành (lịch sử lưu tại Git và các báo cáo cũ).
 
-```bash
-python3 -c '
-import os, shutil
-
-src_root = os.path.expanduser("~/.config/google-chrome")
-
-def clone_profile(profile_name, dst_root):
-    os.makedirs(dst_root, exist_ok=True)
-    if os.path.exists(f"{src_root}/Local State"):
-        shutil.copy2(f"{src_root}/Local State", f"{dst_root}/Local State")
-    dst_prof = f"{dst_root}/{profile_name}"
-    os.makedirs(dst_prof, exist_ok=True)
-    src_prof = f"{src_root}/{profile_name}"
-    for item in ["Preferences", "Cookies", "Network Persistent State", "Local Storage", "Local Extension Settings"]:
-        s = f"{src_prof}/{item}"
-        d = f"{dst_prof}/{item}"
-        if os.path.exists(s):
-            if os.path.isdir(s):
-                if os.path.exists(d): shutil.rmtree(d)
-                shutil.copytree(s, d)
-            else:
-                shutil.copy2(s, d)
-    print(f"Cloned {profile_name} to {dst_root}")
-
-clone_profile("Profile 1", "/tmp/chrome-test-p1")
-clone_profile("Default", "/tmp/chrome-test-default")
-'
-```
+Hiện nay, script [`tests/verify-dual-profile-live.mjs`](file:///u01/tools/edge-bing-scheduler/tests/verify-dual-profile-live.mjs) tự động thực hiện quy trình sao chép an toàn:
+1. Tạo thư mục tạm cô lập ngẫu nhiên qua `fs.mkdtempSync(path.join(os.tmpdir(), "edge-bing-live-"))` với quyền riêng tư `0700`.
+2. Sao lưu cơ sở dữ liệu `Cookies` qua `sqlite3` API với URI chuẩn hóa an toàn (`pathlib.Path(...).as_uri() + '?mode=ro'` và `src.backup(dst)`), tránh tranh chấp lock và lỗi đường dẫn đặc biệt khi trình duyệt gốc đang chạy.
+3. Sao chép các tệp cấu hình cần thiết (`Preferences`, `Local State`, `Secure Preferences`, `Network Persistent State`) và cấu hình phiên không khôi phục tab cũ.
+4. Tự động dọn dẹp và xóa bỏ thư mục tạm khi kiểm thử hoàn tất trong khối `finally`.
 
 ---
 
@@ -130,74 +104,69 @@ clone_profile("Default", "/tmp/chrome-test-default")
 ```bash
 ./tests/run-all-tests.sh
 ```
-Kết quả đạt yêu cầu: 24/24 Node tests pass, kiểm tra cú pháp thành công, Microsoft Edge tests pass.
+Kết quả đạt yêu cầu: 32/32 Node tests pass (24 unit/functional tests + 8 regression tests), kiểm tra cú pháp thành công, Microsoft Edge fixtures & extension smoke test pass.
 
-### 5.2. Chạy kịch bản kiểm tra trạng thái 2 profile qua Virtual Display
-Sử dụng script có sẵn tại `tests/verify-dual-profile-live.mjs`:
+### 5.2. Chạy kịch bản kiểm tra trạng thái 2 profile qua Virtual Display (Khuyến nghị chuẩn)
+Sử dụng script tự động hóa an toàn tại `tests/verify-dual-profile-live.mjs`:
 ```bash
 /u01/workspace/FacebookBot/scripts/run-with-virtual-display.sh env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_CURRENT_DESKTOP=GNOME node tests/verify-dual-profile-live.mjs
 ```
+* **Đặc điểm:** Tự động clone profile vào thư mục tạm `0700`, sao lưu SQLite cookie qua mode read-only, mở popup extension, kích hoạt `chrome.runtime.reload()`, đối soát SHA256 mã nguồn runtime với repo, kiểm tra panelflyout + dashboard.
+* **Quy ước mã thoát (Exit Semantics):** Áp dụng nguyên tắc fail-closed. Trả về exit code `1` nếu bất kỳ profile nào có Daily Set chưa hoàn thành trong ngày (ví dụ `Default` 0/3) hoặc thiếu dữ liệu/không xác thực; trả về exit code `0` chỉ khi tất cả profile đều hoàn thành (`complete`).
 
-### 5.3. Cách kiểm tra trực tiếp trạng thái panelflyout của một profile qua CDP
-Tạo file kiểm tra nhanh (ví dụ `/tmp/check-status.mjs`):
-```javascript
-import { spawn } from "node:child_process";
+### 5.3. Ý Nghĩa & Cấu Trúc Dữ Liệu Chẩn Đoán JSON (Verifier Status Semantics)
 
-async function check() {
-  const chromeProc = spawn("google-chrome", [
-    "--user-data-dir=/tmp/chrome-test-p1",
-    "--profile-directory=Profile 1",
-    "--remote-debugging-port=9444",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "https://www.bing.com/rewards/panelflyout"
-  ], { stdio: "ignore" });
+Các đoạn mã kiểm tra CDP thủ công trước đây (chạy qua file tạm cố định như `/tmp/check-status.mjs`, cổng cố định `9444`, và kết thúc bằng `SIGKILL`) đã được loại bỏ để tránh xung đột cổng và tắt nhầm tiến trình. Lịch sử của các script này được lưu tại Git và các báo cáo cũ.
 
-  await new Promise(r => setTimeout(r, 6000));
-  const list = await (await fetch("http://127.0.0.1:9444/json/list")).json();
-  const page = list.find(t => t.type === "page");
-  const ws = new globalThis.WebSocket(page.webSocketDebuggerUrl);
-  await new Promise(r => ws.onopen = r);
+Hiện tại, việc kiểm tra trạng thái profile được thực hiện tập trung qua script tự động [`tests/verify-dual-profile-live.mjs`](file:///u01/tools/edge-bing-scheduler/tests/verify-dual-profile-live.mjs) (Mục 5.2). Mỗi profile được phân tích và xuất kết quả theo định dạng JSON có cấu trúc rõ ràng:
 
-  ws.send(JSON.stringify({
-    id: 1,
-    method: "Runtime.evaluate",
-    params: {
-      expression: `(() => {
-        const vm = window.flyoutViewModel;
-        const today = new Date();
-        const key = (today.getMonth() + 1) + "/" + today.getDate() + "/" + today.getFullYear();
-        const dsp = vm?.flyoutResult?.dailySetPromotions?.[key] || [];
-        return dsp.map(c => ({ name: c.name, complete: c.complete, points: c.pointProgress }));
-      })()`,
-      returnByValue: true
-    }
-  }));
-
-  ws.onmessage = (ev) => {
-    const res = JSON.parse(ev.data);
-    if (res.id === 1) {
-      console.log("Daily Set Status:", JSON.stringify(res.result?.result?.value, null, 2));
-      ws.close();
-      chromeProc.kill("SIGKILL");
-    }
-  };
-}
-check();
-```
-Chạy với virtual display:
-```bash
-/u01/workspace/FacebookBot/scripts/run-with-virtual-display.sh env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus XDG_CURRENT_DESKTOP=GNOME node /tmp/check-status.mjs
-```
-
-Tiêu chí xác nhận thành công:
 ```json
-Daily Set Status: [
-  { "name": "Global_DailySet_..._Child1", "complete": true, "points": 10 },
-  { "name": "Global_DailySet_..._Child2", "complete": true, "points": 10 },
-  { "name": "Global_DailySet_..._Child3", "complete": true, "points": 10 }
-]
+{
+  "profile": "Profile 1",
+  "observedAt": "2026-10-25T11:32:59.065Z",
+  "extensionPath": "/u01/tools/edge-bing-scheduler",
+  "reload": {
+    "verified": true,
+    "before": "FD34B1635BB9D21B3C5965FAE6DEAA34",
+    "after": "F480E5254439296130F9015B562F0955",
+    "sourceVerified": true,
+    "sourceHashes": {
+      "background.js": "cd8aac2a2340c62957b786a40ec03d7816d6518485961d8683e994cb22fe8d95",
+      "reward-dom-helpers.js": "d6a785b8c74b2a0a991aefcf71f5d9873e6ceed4f5c2e5ca159c098be4a029cd"
+    }
+  },
+  "flyout": {
+    "authenticated": true,
+    "todayKey": "10/25/2026",
+    "todayPresent": true,
+    "availablePoints": 3351,
+    "streakDays": 132,
+    "cards": [
+      { "name": "Global_DailySet_20261025_Child1", "complete": true, "points": 10, "max": 10 },
+      { "name": "Global_DailySet_20261025_Child2", "complete": true, "points": 10, "max": 10 },
+      { "name": "Global_DailySet_20261025_Child3", "complete": true, "points": 10, "max": 10 }
+    ]
+  },
+  "dashboard": {
+    "native": false,
+    "restored": true,
+    "cardCount": 3,
+    "helpersCurrent": true,
+    "readyCards": ["Ready to claim 0 Claim"]
+  },
+  "assessment": {
+    "status": "complete",
+    "completed": 3,
+    "total": 3
+  }
+}
 ```
+
+* **Ý nghĩa các trường đánh giá `assessment.status`:**
+  - `"complete"`: Tài khoản đã xác thực, thẻ ngày hôm nay tồn tại đầy đủ, DOM dashboard hợp lệ, và toàn bộ thẻ Daily Set đạt `complete: true`.
+  - `"incomplete"`: Tài khoản hợp lệ nhưng còn thẻ Daily Set chưa hoàn thành (ví dụ Default Profile hôm nay có 0/3 thẻ hoàn thành).
+  - `"unavailable"`: Không thỏa mãn các điều kiện cơ bản (chưa reload extension, sai hash source, chưa đăng nhập, hoặc DOM dashboard thiếu thẻ).
+* **Mã thoát toàn trình (Process Exit Code):** Verifier chạy tuần tự cả 2 profile. Nếu có bất kỳ profile nào có kết quả đánh giá không phải `"complete"`, toàn bộ tiến trình trả về mã thoát **Exit 1**. Chỉ khi tất cả profile đều đạt `"complete"`, tiến trình mới trả về **Exit 0**.
 
 ---
 
@@ -206,9 +175,10 @@ Daily Set Status: [
 Tất cả các tài liệu kỹ thuật, nghiên cứu và báo cáo bugfix được lưu trữ tập trung tại thư mục `docs/`:
 
 1. [`docs/MULTI_PROFILE_TESTING_AND_VERIFICATION_GUIDE.md`](file:///u01/tools/edge-bing-scheduler/docs/MULTI_PROFILE_TESTING_AND_VERIFICATION_GUIDE.md): Quy trình chuẩn rà soát, fix bug, chạy kiểm thử thật với các profile và quy tắc virtual display.
-2. [`docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md`](file:///u01/tools/edge-bing-scheduler/docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md): Nhật ký kỹ thuật chi tiết về flight `vsstreak`, cơ chế phục hồi `#ext-restored-dailyset`, phát hiện endpoint `/msrewards/api/v1/reportactivity` và chứng minh thực nghiệm.
-3. [`docs/optimization-2026-10-12-rewards-hydration-scheduler.md`](file:///u01/tools/edge-bing-scheduler/docs/optimization-2026-10-12-rewards-hydration-scheduler.md): Tối ưu hóa bộ quét hydration, cơ chế retry ổn định trên các trang Rewards React.
-4. [`docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md`](file:///u01/tools/edge-bing-scheduler/docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md): Xử lý lỗi bảo vệ trang scripting trên Microsoft Edge.
+2. [`docs/verification-and-claim-fix-2026-10-25-dual-profile-live.md`](file:///u01/tools/edge-bing-scheduler/docs/verification-and-claim-fix-2026-10-25-dual-profile-live.md): Báo cáo kỹ thuật chi tiết ngày 25/10/2026 về sửa lỗi claim điểm 0 ("Ready to claim 0 Claim"), đồng bộ regex MAIN-world, kiểm chứng reload extension và kết quả kiểm thử thực tế 2 profile.
+3. [`docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md`](file:///u01/tools/edge-bing-scheduler/docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md): Nhật ký kỹ thuật chi tiết về flight `vsstreak`, cơ chế phục hồi `#ext-restored-dailyset`, phát hiện endpoint `/msrewards/api/v1/reportactivity` và chứng minh thực nghiệm.
+4. [`docs/optimization-2026-10-12-rewards-hydration-scheduler.md`](file:///u01/tools/edge-bing-scheduler/docs/optimization-2026-10-12-rewards-hydration-scheduler.md): Tối ưu hóa bộ quét hydration, cơ chế retry ổn định trên các trang Rewards React.
+5. [`docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md`](file:///u01/tools/edge-bing-scheduler/docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md): Xử lý lỗi bảo vệ trang scripting trên Microsoft Edge.
 
 ---
 
@@ -283,8 +253,9 @@ Trên trang `https://rewards.bing.com/dashboard`, người dùng thường có c
 ### 8.2. Nguyên nhân lỗi trước đây
 1. **Tìm kiếm phần tử bao phủ quá rộng:** Quét `document.querySelectorAll("*")` khớp phải các thẻ cha cấp cao (`<html>`, `<body>`, `div.flex`), dẫn đến `cardContainer.querySelector("button")` lấy nhầm nút điều hướng khác thay vì nút "Ready to claim".
 2. **Sai lệch chuỗi sự kiện React Aria:** React Aria (`usePress`) yêu cầu chuỗi PointerEvents hoàn chỉnh (`pointerdown` với `pointerId: 1`, `pointerType: "mouse"`, `isPrimary: true`, `pressure: 0.5`) trên chính phần tử `<button data-react-aria-pressable="true">`, không chỉ gọi `.click()` trên `<span>` con.
-3. **Mẫu regex chưa bao quát:** Thẻ ban đầu có text `"Ready to claim 6 Claim"`, và nút confirm có text `"6 Pending Claim points"` hoặc chỉ `"Claim"` / `"Nhận"`. Regex cũ đòi hỏi cụm từ cố định `"claim points"` nên bỏ qua.
+3. **Mẫu regex chưa bao quát và lệch môi trường tiêm (MAIN-world):** Thẻ ban đầu có text `"Ready to claim 6 Claim"`, và nút confirm có text `"6 Pending Claim points"` hoặc chỉ `"Claim"` / `"Nhận"`. Regex cũ đòi hỏi cụm từ cố định `"claim points"` nên bỏ qua. Đồng thời, `injectDomHelpers` trước đây không truyền nguồn regex mới nhất sang MAIN-world và không làm mới helper khi regex bị cũ.
 4. **Không đợi flyout tải xong dữ liệu:** Flyout mở ra có độ trễ tải backend; việc kiểm tra nút confirm ngay tại thời điểm flyout mount sẽ gặp mảng rỗng (skeleton loader).
+5. **Bịa đặt 1 điểm và click lặp thẻ có 0 điểm:** Biểu thức `points: points || 1` tự gán 1 điểm khi thẻ trả về 0 điểm (ví dụ đã claim xong và hiển thị `"Ready to claim 0 Claim"`), gây click lặp lại liên tục.
 
 ### 8.3. Giải pháp chuẩn hóa
 1. **Ưu tiên quét trực tiếp button / pressable:**
@@ -292,14 +263,19 @@ Trên trang `https://rewards.bing.com/dashboard`, người dùng thường có c
    ```javascript
    /^\s*(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?|claim|nhận|reclamar|einlösen))?[\s!:]*|[\s!:]*)*(?:claim|nhận)?\s*$/i
    ```
-2. **Mô phỏng React Aria Pointer Events:**
+2. **Đồng bộ biểu thức regex vào MAIN-world:**
+   Truyền `READY_TO_CLAIM_LABEL_RE.source` và `CLAIM_MATCH_RE.source` qua tham số injection của `executeRewardsScript`. So khớp `.source` trong `helpersReady` để tự động làm mới helper nếu ngữ cảnh trang chứa regex cũ.
+3. **Loại bỏ fallback bịa điểm và chặn thẻ <= 0 điểm:**
+   Giữ nguyên giá trị `points` thực tế trích xuất từ DOM; lặp qua các nút ready to claim và chỉ trả về khi `points > 0`, tiếp tục đánh giá sau các nút 0 điểm; sử dụng guard `!/\d/.test(text)` để chặn mọi số 0 dính liền nhãn (`0points`, `0Claim`), chuẩn hóa predicate `isSingleActivity` loại trừ major sections, xử lý đúng `findRewardCardRoots` tìm kiếm descendants (coi nút tự thân không có con là 1 root), loại trừ container nhiều thẻ và fail-closed khi `points <= 0` (`{ clicked: false, claimedPoints: 0, reason: "not_ready" }`).
+4. **Mô phỏng React Aria Pointer Events:**
    Kích hoạt đầy đủ `pointerdown` -> `mousedown` -> `pointerup` -> `mouseup` -> `click` trên nút bấm mục tiêu.
-3. **Loại bỏ banner cookies và polling đợi flyout render:**
+5. **Loại bỏ banner cookies và polling đợi flyout render:**
    Bỏ qua các phần tử cố định dính đáy (`bottom-0` & `sticky`), poll kiểm tra nút confirm bên trong `<section role="dialog">` đến khi xuất hiện.
-4. **Nhấp nút confirm và dọn dẹp:**
+6. **Nhấp nút confirm và dọn dẹp:**
    Kích hoạt claim trên button confirm, đợi 2.5s để mutation server cập nhật, sau đó nhấn nút `button[slot="close"]` để đóng flyout.
-5. **Kiểm chứng thực tế:**
+7. **Kiểm chứng thực tế:**
    Đã chạy kiểm chứng trên cả `Profile 1` và `Default Profile` qua virtual display (`run-with-virtual-display.sh`):
-   - Thẻ điểm chuyển trạng thái từ 6 về 0: `"Ready to claim 0 Claim"`.
-   - Điểm khả dụng (Available points) tăng tương ứng trên tài khoản (ví dụ Profile Default tăng từ 1192 lên 1198).
+   - Ngày 25/10/2026: Profile Default nhận thành công +112 điểm (2413 -> 2525, pending 112 -> 0); Profile 1 nhận thành công +12 điểm (3351 -> 3363, pending 12 -> 0) trên mã nguồn `cd8aac2a...`.
+   - Ngày 26/10/2026: Kiểm chứng chỉ đọc lúc 13:38 - 13:39 VN (`final-source-verifier-4e4292.log`) ghi nhận cả 2 profile đạt 3/3 thẻ DailySet, verifier exit code 0. Đợt targeted claim mới trên mã nguồn `4e429271...` ghi nhận thành công trọn vẹn: Profile Default nhận +3 điểm (2594 -> 2597, pending 3 -> 0); Profile 1 nhận +3 điểm (3402 -> 3405, pending 3 -> 0).
+   - Thẻ điểm trên cả 2 tài khoản cập nhật chính xác về trạng thái: `"Ready to claim 0 Claim"`. Không còn hiện tượng click lặp trên thẻ 0 điểm.
 

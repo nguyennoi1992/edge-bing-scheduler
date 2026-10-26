@@ -1,7 +1,9 @@
 // Use as an ES module for MV3 service worker
 import { buildQueries } from "./words.js";
 import {
+  CLAIM_MATCH_RE,
   EMPTY_REWARD_STABLE_MS,
+  READY_TO_CLAIM_LABEL_RE,
   QUIZ_COMPLETION_RE,
   buildQuestActivityKey,
   buildQuestCardKey,
@@ -399,8 +401,8 @@ async function injectDomHelpers(tabId) {
   });
 
   await executeRewardsScript(tabId, {
-    args: [EMPTY_REWARD_STABLE_MS],
-    func: (emptyRewardStableMs) => {
+    args: [EMPTY_REWARD_STABLE_MS, READY_TO_CLAIM_LABEL_RE.source, CLAIM_MATCH_RE.source],
+    func: (emptyRewardStableMs, readyToClaimSource, claimMatchSource) => {
       const helpersReady =
         typeof window.normalizeRewardText === "function" &&
         typeof window.isCompletedText === "function" &&
@@ -418,7 +420,10 @@ async function injectDomHelpers(tabId) {
         typeof window.shouldFinishEmptyRewardScan === "function" &&
         typeof window.parsePointsFromText === "function" &&
         typeof window.isCardCompleted === "function" &&
-        window.READY_TO_CLAIM_LABEL_RE instanceof RegExp;
+        window.READY_TO_CLAIM_LABEL_RE instanceof RegExp &&
+        window.READY_TO_CLAIM_LABEL_RE.source === readyToClaimSource &&
+        window.CLAIM_MATCH_RE instanceof RegExp &&
+        window.CLAIM_MATCH_RE.source === claimMatchSource;
       if (window.__rewardDomHelpersInjected && helpersReady) return;
       window.__rewardDomHelpersInjected = true;
 
@@ -426,8 +431,8 @@ async function injectDomHelpers(tabId) {
         return (value || "").replace(/\s+/g, " ").trim();
       };
 
-      window.READY_TO_CLAIM_LABEL_RE =
-        /^\s*(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению)(?:[\s!:]*(?:\+\s*)?\d[\d,.]*(?:\s*(?:points?|pts?))?[\s!:]*|[\s!:]*)?\s*$/i;
+      window.READY_TO_CLAIM_LABEL_RE = new RegExp(readyToClaimSource, "i");
+      window.CLAIM_MATCH_RE = new RegExp(claimMatchSource, "i");
 
       window.parsePointsFromText = function parsePointsFromText(text) {
         const input = typeof text === "string" ? text : String(text ?? "");
@@ -945,27 +950,57 @@ async function autoClickRewards() {
             return true;
           };
 
+          const isSingleActivity = (el) => {
+            if (!el || !(el instanceof HTMLElement)) return false;
+            if (el.matches?.("section, body, #dailyset, #moreactivities, #ext-restored-dailyset")) return false;
+            if (typeof window.findRewardCardRoots !== "function") {
+              return Boolean(el.matches?.("button, [role='button'], [data-react-aria-pressable='true'], a"));
+            }
+            const roots = window.findRewardCardRoots(el);
+            const count = roots.length === 0 && el.matches?.("button, [role='button'], [data-react-aria-pressable='true'], a") ? 1 : roots.length;
+            return count === 1;
+          };
+
           const findReadyToClaimCard = () => {
             const allButtons = Array.from(
               document.querySelectorAll("button, [role='button'], [data-react-aria-pressable='true'], a"),
             );
-            const directCard = allButtons.find((btn) => {
-              if (!isVisible(btn) || btn.disabled || btn.getAttribute("aria-disabled") === "true") return false;
-              const text = getNodeText(btn);
-              return window.READY_TO_CLAIM_LABEL_RE
+            for (const directCard of allButtons) {
+              if (!isVisible(directCard) || directCard.disabled || directCard.getAttribute("aria-disabled") === "true") continue;
+              const text = getNodeText(directCard);
+              const matchesLabel = window.READY_TO_CLAIM_LABEL_RE
                 ? window.READY_TO_CLAIM_LABEL_RE.test(text)
                 : /ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению/i.test(text);
-            });
-            if (directCard) {
-              const text = getNodeText(directCard);
-              const points = typeof window.parsePointsFromText === "function"
+              if (!matchesLabel) continue;
+
+              let points = typeof window.parsePointsFromText === "function"
                 ? window.parsePointsFromText(text)
                 : 0;
-              return {
-                cardButton: directCard,
-                cardContainer: directCard,
-                points: points || 1,
-              };
+              let cardContainer = directCard;
+
+              if (points === 0 && !/\d/.test(text)) {
+                const parentCard = directCard.parentElement?.closest?.(
+                  "[data-reward-card-name], [data-offer-id], [class*='rounded-cornerCardDefault'], [class*='card' i], [data-rac]:not(section):not(body), article, li",
+                );
+                if (parentCard && parentCard !== directCard && isSingleActivity(parentCard)) {
+                  const containerText = getNodeText(parentCard);
+                  const parentPoints = typeof window.parsePointsFromText === "function"
+                    ? window.parsePointsFromText(containerText)
+                    : 0;
+                  if (parentPoints > 0) {
+                    points = parentPoints;
+                    cardContainer = parentCard;
+                  }
+                }
+              }
+
+              if (points > 0) {
+                return {
+                  cardButton: directCard,
+                  cardContainer,
+                  points,
+                };
+              }
             }
 
             const elements = collectAllElements(document);
@@ -980,32 +1015,40 @@ async function autoClickRewards() {
             for (const cand of candidates) {
               const cardContainer =
                 cand.closest(
-                  "button, [role='button'], [data-react-aria-pressable='true'], [class*='card' i], [data-rac], section",
+                  "button, [role='button'], [data-react-aria-pressable='true'], [data-reward-card-name], [data-offer-id], [class*='rounded-cornerCardDefault'], [class*='card' i], [data-rac]:not(section):not(body), article, li",
                 ) || cand.parentElement;
-              if (!cardContainer || !isVisible(cardContainer)) continue;
+              if (!cardContainer || !isVisible(cardContainer) || !isSingleActivity(cardContainer)) continue;
 
-              const containerText = getNodeText(cardContainer);
-              const points = typeof window.parsePointsFromText === "function"
-                ? window.parsePointsFromText(containerText)
+              const clickable =
+                cardContainer.querySelector(
+                  "button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]",
+                ) ||
+                (cardContainer.matches?.("button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]")
+                  ? cardContainer
+                  : cand);
+
+              const actionText = getNodeText(clickable) || getNodeText(cand);
+              let points = typeof window.parsePointsFromText === "function"
+                ? window.parsePointsFromText(actionText)
                 : 0;
 
-              const hasClaimablePoints =
-                points > 0 ||
-                (/\b\d+\b/.test(containerText) && /claim|nhận|reclamar|einlösen/i.test(containerText));
+              if (points === 0 && !/\d/.test(actionText)) {
+                if (cardContainer !== clickable) {
+                  const containerText = getNodeText(cardContainer);
+                  const containerPoints = typeof window.parsePointsFromText === "function"
+                    ? window.parsePointsFromText(containerText)
+                    : 0;
+                  if (containerPoints > 0) {
+                    points = containerPoints;
+                  }
+                }
+              }
 
-              if (hasClaimablePoints) {
-                const clickable =
-                  cardContainer.querySelector(
-                    "button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]",
-                  ) ||
-                  (cardContainer.matches?.("button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]")
-                    ? cardContainer
-                    : cand);
-
+              if (points > 0) {
                 return {
                   cardButton: clickable,
                   cardContainer,
-                  points: points || 1,
+                  points,
                 };
               }
             }
@@ -1063,7 +1106,7 @@ async function autoClickRewards() {
 
           console.log("[Rewards-Debug] claimReadyPoints: Scanning for ready-to-claim cards...");
           const readyCard = findReadyToClaimCard();
-          if (!readyCard) {
+          if (!readyCard || readyCard.points <= 0) {
             console.log("[Rewards-Debug] claimReadyPoints: No ready-to-claim card found.");
             return { clicked: false, claimedPoints: 0, reason: "not_ready" };
           }
