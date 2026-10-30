@@ -993,6 +993,9 @@ test("extractYourActivityFromFlyoutHtml parses all 5 activity cards and streaks"
 
   assert.equal(extractYourActivityFromFlyoutHtml(null), null);
   assert.equal(extractYourActivityFromFlyoutHtml(""), null);
+  assert.equal(extractYourActivityFromFlyoutHtml("<html>no flyout data</html>"), null);
+  assert.equal(extractYourActivityFromFlyoutHtml("<script>window.flyoutViewModel = { flyoutResult: {} };</script>"), null);
+  assert.equal(extractYourActivityFromFlyoutHtml("<script>window.flyoutViewModel = { flyoutResult: { dailyCheckInPromotion: { attributes: {} } } };</script>"), null);
 });
 
 

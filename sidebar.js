@@ -172,7 +172,7 @@ async function loadDailySet() {
   if (!container || !list) return;
 
   chrome.runtime.sendMessage({ type: "GET_RESTORED_DAILY_SET" }, (res) => {
-    if (!res?.ok || !res?.data?.cards?.length) {
+    if (chrome.runtime.lastError || !res?.ok || !res?.data?.cards?.length) {
       container.style.display = "none";
       return;
     }
@@ -205,8 +205,11 @@ async function loadDailySet() {
 
     list.querySelectorAll(".open-card-btn").forEach((btn) => {
       btn.addEventListener("click", (e) => {
-        const u = e.currentTarget.getAttribute("data-url");
-        if (u) chrome.tabs.create({ url: u, active: true });
+        let u = e.currentTarget.getAttribute("data-url");
+        if (u) {
+          if (u.startsWith("/")) u = "https://www.bing.com" + u;
+          chrome.tabs.create({ url: u, active: true });
+        }
       });
     });
   });
@@ -219,7 +222,7 @@ async function loadYourActivity() {
   if (!container || !list) return;
 
   chrome.runtime.sendMessage({ type: "GET_YOUR_ACTIVITY" }, (res) => {
-    if (!res?.ok || !res?.data?.activities?.length) {
+    if (chrome.runtime.lastError || !res?.ok || !res?.data?.activities?.length) {
       container.style.display = "none";
       return;
     }
@@ -263,8 +266,11 @@ async function loadYourActivity() {
 
     list.querySelectorAll(".open-act-btn").forEach((btn) => {
       btn.addEventListener("click", (e) => {
-        const u = e.currentTarget.getAttribute("data-url");
-        if (u) chrome.tabs.create({ url: u, active: true });
+        let u = e.currentTarget.getAttribute("data-url");
+        if (u) {
+          if (u.startsWith("/")) u = "https://www.bing.com" + u;
+          chrome.tabs.create({ url: u, active: true });
+        }
       });
     });
 
@@ -274,6 +280,7 @@ async function loadYourActivity() {
         b.disabled = true;
         b.textContent = "Searching...";
         chrome.runtime.sendMessage({ type: "TRIGGER_VISUAL_SEARCH" }, () => {
+          if (chrome.runtime.lastError) {}
           loadYourActivity();
         });
       });

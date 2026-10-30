@@ -439,6 +439,7 @@ export function extractYourActivityFromFlyoutHtml(html) {
   const dcip = vm.flyoutResult?.dailyCheckInPromotion;
   if (!dcip) return null;
   const attrs = dcip.attributes || {};
+  if (!Object.keys(attrs).some((k) => k.startsWith("partner_"))) return null;
 
   const parseActivity = (id, name, defaultPrefix) => {
     const isCompleted = String(attrs[`partner_${id}_completed`]).toLowerCase() === "true";
@@ -484,7 +485,7 @@ export function extractYourActivityFromFlyoutHtml(html) {
   ];
 
   return {
-    streakDays: Number(attrs.streakCounter || vm.flyoutResult?.streakPromotion?.activityProgress || 0),
+    streakDays: Number(attrs.streakCounter ?? vm.flyoutResult?.streakPromotion?.activityProgress ?? 0),
     activities,
   };
 }

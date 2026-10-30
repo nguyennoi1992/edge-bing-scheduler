@@ -706,6 +706,9 @@ async function fetchAndRestoreDailySet(tabId, { forceFresh = false } = {}) {
     const cachedDate = cached?.cachedDailySetDate;
 
     if (forceFresh || !dailySetData || cachedDate !== today || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
+      if (forceFresh || cachedDate !== today) {
+        dailySetData = null;
+      }
       const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
         credentials: "include",
       });
@@ -5177,7 +5180,14 @@ async function performVisualSearch(targetWindowId) {
         if (btn) btn.click();
         await delay(1200);
 
-        const input = document.querySelector("#sb_fileinput");
+        let input = document.querySelector("#sb_fileinput");
+        if (!input) {
+          for (let i = 0; i < 6; i++) {
+            await delay(500);
+            input = document.querySelector("#sb_fileinput");
+            if (input) break;
+          }
+        }
         if (!input) return { ok: false, error: "file_input_missing" };
 
         const canvas = document.createElement("canvas");
@@ -5200,6 +5210,7 @@ async function performVisualSearch(targetWindowId) {
         const dt = new DataTransfer();
         dt.items.add(file);
         input.files = dt.files;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
         return { ok: true };
       },
@@ -5210,8 +5221,69 @@ async function performVisualSearch(targetWindowId) {
       await appendDebugLog("warn", "rewards", "Visual search injection outcome", execRes);
     }
 
-    // Wait for search navigation and reward registration
-    await sleep(8000);
+    // Wait for search redirect
+    const initialUrl = "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES";
+    const startRedirect = Date.now();
+    let redirected = false;
+    while (Date.now() - startRedirect < 12000) {
+      try {
+        const curTab = await chrome.tabs.get(tab.id);
+        const curUrl = curTab.url || curTab.pendingUrl || "";
+        if (curUrl && curUrl !== initialUrl && !curUrl.includes("features=vsstreak")) {
+          redirected = true;
+          break;
+        }
+      } catch {}
+      await sleep(500);
+    }
+    if (redirected) {
+      await waitForTabComplete(tab.id, 10000).catch(() => {});
+    } else {
+      await sleep(4000);
+    }
+
+    // Report activity to activate/advance streak
+    try {
+      const cached = await chrome.storage.local.get(["cachedDailySetData"]);
+      const userId = cached?.cachedDailySetData?.userId || "";
+      const reportPayload = {
+        ActivityType: 714,
+        ActivitySubType: "",
+        OfferId: "visualsearch_streak_activation_v2",
+        Channel: "BingFlyout",
+        PartnerId: "BingRewards",
+        UserId: userId,
+        AuthKey: "",
+        ActivityCount: 1,
+      };
+
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        args: [reportPayload],
+        func: async (payload) => {
+          try {
+            await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+              method: "POST",
+              headers: { "Content-Type": "text/plain;charset=UTF-8" },
+              credentials: "include",
+              body: JSON.stringify(payload),
+            });
+          } catch {}
+        },
+      }).catch(() => {});
+
+      await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        credentials: "include",
+        body: JSON.stringify(reportPayload),
+      }).catch(() => {});
+    } catch (reportErr) {
+      console.warn("[Rewards] Visual Search reportactivity error:", reportErr);
+    }
+
+    await sleep(2000);
     await appendDebugLog("info", "rewards", "Visual search completed successfully");
     return { ok: true };
   } catch (err) {
@@ -5824,6 +5896,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         let data = cached?.cachedDailySetData;
         const cachedDate = cached?.cachedDailySetDate;
         if (!data || cachedDate !== today || !Array.isArray(data.cards) || data.cards.length === 0) {
+          if (cachedDate !== today) data = null;
           const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
             credentials: "include",
           });
@@ -5854,6 +5927,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         let data = cached?.cachedYourActivityData;
         const cachedDate = cached?.cachedYourActivityDate;
         if (!data || cachedDate !== today || !Array.isArray(data.activities) || data.activities.length === 0) {
+          if (cachedDate !== today) data = null;
           const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
             credentials: "include",
           });
