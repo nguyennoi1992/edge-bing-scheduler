@@ -335,7 +335,7 @@ export function isRewardsPageUrl(url) {
   }
 }
 
-export function extractDailySetFromFlyoutHtml(html) {
+export function parseFlyoutViewModel(html) {
   if (!html || typeof html !== "string") return null;
   const prefix = "window.flyoutViewModel";
   const startIdx = html.indexOf(prefix);
@@ -348,7 +348,6 @@ export function extractDailySetFromFlyoutHtml(html) {
   let depth = 0;
   let inString = false;
   let escape = false;
-  let vm = null;
 
   for (let i = jsonStart; i < html.length; i++) {
     const ch = html[i];
@@ -371,16 +370,19 @@ export function extractDailySetFromFlyoutHtml(html) {
         if (depth === 0) {
           const jsonStr = html.substring(jsonStart, i + 1);
           try {
-            vm = JSON.parse(jsonStr);
+            return JSON.parse(jsonStr);
           } catch {
             return null;
           }
-          break;
         }
       }
     }
   }
+  return null;
+}
 
+export function extractDailySetFromFlyoutHtml(html) {
+  const vm = parseFlyoutViewModel(html);
   if (!vm) return null;
 
   const dsp = vm.flyoutResult?.dailySetPromotions || {};
@@ -428,5 +430,61 @@ export function extractDailySetFromFlyoutHtml(html) {
       imageUrl: c.imageUrl || c.smallImageUrl || "",
       complete: Boolean(c.complete),
     })),
+  };
+}
+
+export function extractYourActivityFromFlyoutHtml(html) {
+  const vm = parseFlyoutViewModel(html);
+  if (!vm) return null;
+  const dcip = vm.flyoutResult?.dailyCheckInPromotion;
+  if (!dcip) return null;
+  const attrs = dcip.attributes || {};
+
+  const parseActivity = (id, name, defaultPrefix) => {
+    const isCompleted = String(attrs[`partner_${id}_completed`]).toLowerCase() === "true";
+    const isEnabled = attrs[`partner_${id}_isEnabled`] !== undefined
+      ? String(attrs[`partner_${id}_isEnabled`]).toLowerCase() !== "false"
+      : true;
+    const arg0 = attrs[`partner_${id}_titleArg0`];
+    const arg1 = attrs[`partner_${id}_titleArg1`];
+    const currentStep = Number(attrs[`partner_${id}_currentStep`] || 0);
+    const totalSteps = Number(attrs[`partner_${id}_totalSteps`] || 7);
+    const destUrl = (attrs[`partner_${id}_destinationUrl`] || "").replace(/"/g, "%22");
+    const iconUrl = attrs[`partner_${id}_url`] || "";
+    const streak = currentStep > 0 ? (isCompleted ? currentStep : Math.max(0, currentStep - 1)) : 0;
+
+    let progressLabel = "";
+    if (arg0 !== undefined && arg1 !== undefined) {
+      progressLabel = `${defaultPrefix}: ${arg0}/${arg1}`;
+    } else if (currentStep > 0) {
+      progressLabel = `${defaultPrefix}: ${isCompleted ? 1 : 0}/1`;
+    }
+
+    return {
+      id,
+      name,
+      completed: isCompleted,
+      isEnabled,
+      currentStep,
+      totalSteps,
+      streak,
+      progressLabel,
+      destinationUrl: destUrl,
+      iconUrl,
+      activationOffer: attrs[`partner_${id}_activationOffer`] || "",
+    };
+  };
+
+  const activities = [
+    parseActivity("bing", "Bing", "Search"),
+    parseActivity("dset", "Daily Set", "Activity"),
+    parseActivity("edge", "Edge", "Minutes"),
+    parseActivity("sapphire", "Mobile App", "Check-in"),
+    parseActivity("visualsearch", "Visual Search", "Activity"),
+  ];
+
+  return {
+    streakDays: Number(attrs.streakCounter || vm.flyoutResult?.streakPromotion?.activityProgress || 0),
+    activities,
   };
 }

@@ -11,11 +11,13 @@ An automation extension for Microsoft Edge that helps you **complete Bing Reward
     * Configure a specific time to run every day (HH:MM, 24-hour format)
     * Manual **Run Now** option
 
-* 🎁 **Bing Rewards Auto-Click**
+* 🎁 **Bing Rewards Auto-Click & Activities**
 
-    * Automatically opens `rewards.bing.com`
+    * Automatically opens `rewards.bing.com` / `www.bing.com/rewards`
     * Clicks all **uncompleted activity cards** (Daily set, More activities)
     * Skips completed cards automatically
+    * **Your Activity Widget**: Track all 5 daily streaks (Bing, Daily Set, Edge, Mobile App, Visual Search) in Popup & Side Panel
+    * **Visual Search Automation**: 1-click automated Visual Search with canvas-generated image upload, activates and advances streak 🔥
 
 * 🔍 **Bing Search Automation**
 
@@ -116,6 +118,8 @@ Tất cả tài liệu kỹ thuật, kiến trúc và quy trình kiểm thử đ
   Báo cáo chuyên sâu về flighting `vsstreak`, cơ chế phục hồi `#ext-restored-dailyset`, endpoint `/msrewards/api/v1/reportactivity` và kiểm chứng đa profile.
 * ⚡ [**Rewards Hydration & Scanning Optimization**](docs/optimization-2026-10-12-rewards-hydration-scheduler.md)  
   Kiến trúc quét DOM, phát hiện trạng thái hydration và phân loại section an toàn.
+* 🛡️ [**Edge Gallery Protection & Workarounds (2026-10-30)**](docs/edge-gallery-protection-and-workarounds.md)  
+  Nghiên cứu chuyên sâu về cơ chế lỗi "The extensions gallery cannot be scripted" trên Edge, kiến trúc chuyển dịch domain sang `www.bing.com`, kích hoạt Visual Search và render native trong extension UI.
 * 🛡️ [**Edge Rewards Scripting Protected Page Handling**](docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md)  
   Xử lý ngoại lệ chính sách bảo vệ trang của Microsoft Edge.
 

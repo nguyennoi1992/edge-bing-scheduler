@@ -7,6 +7,7 @@ import {
   READY_TO_CLAIM_LABEL_RE,
   classifyRewardScanState,
   extractDailySetFromFlyoutHtml,
+  extractYourActivityFromFlyoutHtml,
   findQuizCompletionPhrase,
   getRewardHydrationRetryDelay,
   isActionableQuestActivity,
@@ -927,4 +928,71 @@ test("extractDailySetFromFlyoutHtml parses promotions, cards, points, and streak
   assert.equal(extractDailySetFromFlyoutHtml(""), null);
   assert.equal(extractDailySetFromFlyoutHtml("<html>no flyout data</html>"), null);
 });
+
+test("extractYourActivityFromFlyoutHtml parses all 5 activity cards and streaks", () => {
+  const sampleFlyoutHtml = `
+    <script>
+      window.flyoutViewModel = {
+        "flyoutResult": {
+          "dailyCheckInPromotion": {
+            "attributes": {
+              "streakCounter": "321",
+              "partner_bing_completed": "True",
+              "partner_bing_titleArg0": "1",
+              "partner_bing_titleArg1": "1",
+              "partner_bing_currentStep": "5",
+              "partner_bing_destinationUrl": "https://www.bing.com/?form=ML2PCO",
+              "partner_dset_completed": "True",
+              "partner_dset_titleArg0": "3",
+              "partner_dset_titleArg1": "3",
+              "partner_dset_currentStep": "5",
+              "partner_edge_completed": "False",
+              "partner_edge_titleArg0": "0",
+              "partner_edge_titleArg1": "30",
+              "partner_sapphire_completed": "True",
+              "partner_sapphire_titleArg0": "1",
+              "partner_sapphire_titleArg1": "1",
+              "partner_visualsearch_completed": "False",
+              "partner_visualsearch_isEnabled": "False",
+              "partner_visualsearch_activationOffer": "visualsearch_streak_activation_v2",
+              "partner_visualsearch_destinationUrl": "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES"
+            }
+          }
+        }
+      };
+    </script>
+  `;
+
+  const parsed = extractYourActivityFromFlyoutHtml(sampleFlyoutHtml);
+  assert.ok(parsed, "should return parsed object");
+  assert.equal(parsed.streakDays, 321);
+  assert.equal(parsed.activities.length, 5);
+
+  const [bing, dset, edge, sapphire, vs] = parsed.activities;
+  assert.equal(bing.name, "Bing");
+  assert.equal(bing.completed, true);
+  assert.equal(bing.progressLabel, "Search: 1/1");
+  assert.equal(bing.streak, 5);
+
+  assert.equal(dset.name, "Daily Set");
+  assert.equal(dset.completed, true);
+  assert.equal(dset.progressLabel, "Activity: 3/3");
+
+  assert.equal(edge.name, "Edge");
+  assert.equal(edge.completed, false);
+  assert.equal(edge.progressLabel, "Minutes: 0/30");
+
+  assert.equal(sapphire.name, "Mobile App");
+  assert.equal(sapphire.completed, true);
+  assert.equal(sapphire.progressLabel, "Check-in: 1/1");
+
+  assert.equal(vs.name, "Visual Search");
+  assert.equal(vs.completed, false);
+  assert.equal(vs.isEnabled, false);
+  assert.equal(vs.activationOffer, "visualsearch_streak_activation_v2");
+
+  assert.equal(extractYourActivityFromFlyoutHtml(null), null);
+  assert.equal(extractYourActivityFromFlyoutHtml(""), null);
+});
+
 

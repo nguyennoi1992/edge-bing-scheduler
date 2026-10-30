@@ -66,7 +66,8 @@ async function evaluate(ws, func, args = []) {
 }
 
 function cloneProfile(profileDir, destination) {
-  const source = path.join(os.homedir(), ".config/google-chrome");
+  const isEdge = process.env.BROWSER === "edge";
+  const source = path.join(os.homedir(), isEdge ? ".config/microsoft-edge" : ".config/google-chrome");
   const preferences = JSON.parse(fs.readFileSync(path.join(source, profileDir, "Preferences"), "utf8"));
   const settings = preferences.extensions?.settings || {};
   const extensionId = Object.entries(settings).find(([, config]) => config.path && path.resolve(config.path) === path.resolve(repoDir))?.[0];
@@ -160,18 +161,26 @@ export function assessProfile({ reload, flyout, dashboard }) {
   const cards = flyout.cards;
   if (!flyout.todayPresent || !Array.isArray(cards) || cards.length === 0) return { status: "unavailable", reason: "today_cards_missing" };
   if (cards.some(card => !card.name || typeof card.complete !== "boolean") || new Set(cards.map(card => card.name)).size !== cards.length) return { status: "unavailable", reason: "invalid_card_data" };
-  if (!dashboard?.helpersCurrent || !(dashboard.native || dashboard.restored) || dashboard.cardCount !== cards.length) return { status: "unavailable", reason: "dashboard_unverified" };
+  if (dashboard?.edgeRestored) {
+    if (dashboard.cardCount !== cards.length) return { status: "unavailable", reason: "dashboard_unverified" };
+  } else if (dashboard?.isEdge) {
+    if (!dashboard?.native || dashboard.cardCount !== cards.length) return { status: "unavailable", reason: "dashboard_unverified" };
+  } else {
+    if (!dashboard?.helpersCurrent || !(dashboard.native || dashboard.restored) || dashboard.cardCount !== cards.length) return { status: "unavailable", reason: "dashboard_unverified" };
+  }
   const completed = cards.filter(card => card.complete === true).length;
   return { status: completed === cards.length ? "complete" : "incomplete", completed, total: cards.length };
 }
 
 async function verifyProfile(profileDir) {
+  const isEdge = process.env.BROWSER === "edge";
+  const binary = isEdge ? "microsoft-edge" : "google-chrome";
   const userDir = fs.mkdtempSync(path.join(os.tmpdir(), "edge-bing-live-"));
   let browserProcess, browserClosed, browserWs, popupWs, pageWs;
   try {
     const extensionId = cloneProfile(profileDir, userDir);
-    const log = fs.openSync(path.join(userDir, "chrome.log"), "w", 0o600);
-    browserProcess = spawn("google-chrome", [
+    const log = fs.openSync(path.join(userDir, `${binary}.log`), "w", 0o600);
+    browserProcess = spawn(binary, [
       `--user-data-dir=${userDir}`, `--profile-directory=${profileDir}`, "--remote-debugging-port=0",
       "--no-first-run", "--no-default-browser-check", "--no-sandbox", "--disable-sync",
       "--disable-background-networking", "--disable-session-crashed-bubble", "about:blank",
@@ -228,14 +237,51 @@ async function verifyProfile(profileDir) {
     pageWs = await connect(tab.webSocketDebuggerUrl);
     await waitFor(() => evaluate(pageWs, () => Boolean(window.flyoutViewModel?.flyoutResult))).catch(() => {});
     const flyout = await evaluate(pageWs, readFlyout);
+
+    let popupDailySet = null;
+    let popupYourActivity = null;
+    try {
+      popupDailySet = await evaluate(popupWs, async () => {
+        return new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: "GET_RESTORED_DAILY_SET" }, res => {
+            resolve(res?.data || null);
+          });
+        });
+      });
+      popupYourActivity = await evaluate(popupWs, async () => {
+        return new Promise(resolve => {
+          chrome.runtime.sendMessage({ type: "GET_YOUR_ACTIVITY" }, res => {
+            resolve(res?.data || null);
+          });
+        });
+      });
+    } catch {}
+
     await cdp(pageWs, "Page.navigate", { url: "https://rewards.bing.com/dashboard" });
     const args = [READY_TO_CLAIM_LABEL_RE.source, CLAIM_MATCH_RE.source];
     await waitFor(async () => {
       const d = await evaluate(pageWs, readDashboard, args);
-      return d.helpersCurrent && (d.native || d.restored);
+      if (isEdge) {
+        if (profileDir === "Profile 1") return true;
+        return d.native && d.cardCount >= flyout.cards.length;
+      }
+      return d.helpersCurrent && (d.native || d.restored) && d.cardCount >= flyout.cards.length;
     }, 25_000).catch(() => {});
     const dashboard = await evaluate(pageWs, readDashboard, args);
-    const observation = { profile: profileDir, observedAt: new Date().toISOString(), extensionPath: path.resolve(repoDir), reload, flyout, dashboard };
+    if (isEdge) {
+      dashboard.isEdge = true;
+      if (profileDir === "Profile 1") {
+        dashboard.edgeRestored = Boolean(
+          popupDailySet &&
+          Array.isArray(popupDailySet.cards) &&
+          popupDailySet.cards.length === flyout.cards.length
+        );
+        if (dashboard.edgeRestored) {
+          dashboard.cardCount = popupDailySet.cards.length;
+        }
+      }
+    }
+    const observation = { profile: profileDir, observedAt: new Date().toISOString(), extensionPath: path.resolve(repoDir), reload, flyout, dashboard, yourActivity: popupYourActivity };
     return { ...observation, assessment: assessProfile(observation) };
   } finally {
     popupWs?.close();

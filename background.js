@@ -10,6 +10,7 @@ import {
   buildRewardCardKey,
   classifyRewardScanState,
   extractDailySetFromFlyoutHtml,
+  extractYourActivityFromFlyoutHtml,
   getRewardHydrationRetryDelay,
   isActionableQuestActivity,
   isActionableRewardCard,
@@ -721,19 +722,26 @@ async function fetchAndRestoreDailySet(tabId, { forceFresh = false } = {}) {
       console.log(
         `[Rewards] Restoring daily set: ${dailySetData.cards.length} cards, streak: ${dailySetData.streakDays} days, forceFresh=${forceFresh}`,
       );
-      await injectDomHelpers(tabId);
-      await executeRewardsScript(tabId, {
-        args: [dailySetData, forceFresh],
-        func: (data, force) => {
-          if (typeof window.ensurePersistentDailySet === "function") {
-            return window.ensurePersistentDailySet(data, force);
-          }
-          if (typeof window.injectRestoredDailySet === "function") {
-            return window.injectRestoredDailySet(data, force);
-          }
-          return false;
-        },
-      });
+      try {
+        if (tabId) {
+          await injectDomHelpers(tabId);
+          await executeRewardsScript(tabId, {
+            args: [dailySetData, forceFresh],
+            func: (data, force) => {
+              if (typeof window.ensurePersistentDailySet === "function") {
+                return window.ensurePersistentDailySet(data, force);
+              }
+              if (typeof window.injectRestoredDailySet === "function") {
+                return window.injectRestoredDailySet(data, force);
+              }
+              return false;
+            },
+          });
+        }
+      } catch (domErr) {
+        if (!isProtectedPageScriptError(domErr)) throw domErr;
+        // Edge blocks scripting on rewards.bing.com; dailySetData is cached in storage for popup/sidebar
+      }
 
       // Background revalidation to keep data fresh without blocking UI
       if (!forceFresh) {
@@ -744,14 +752,16 @@ async function fetchAndRestoreDailySet(tabId, { forceFresh = false } = {}) {
             const freshData = extractDailySetFromFlyoutHtml(html);
             if (freshData && freshData.cards.length > 0) {
               chrome.storage.local.set({ cachedDailySetData: freshData, cachedDailySetDate: today });
-              executeRewardsScript(tabId, {
-                args: [freshData, true],
-                func: (data, force) => {
-                  if (typeof window.ensurePersistentDailySet === "function") {
-                    window.ensurePersistentDailySet(data, force);
-                  }
-                },
-              }).catch(() => {});
+              if (tabId) {
+                executeRewardsScript(tabId, {
+                  args: [freshData, true],
+                  func: (data, force) => {
+                    if (typeof window.ensurePersistentDailySet === "function") {
+                      window.ensurePersistentDailySet(data, force);
+                    }
+                  },
+                }).catch(() => {});
+              }
             }
           })
           .catch(() => {});
@@ -3807,6 +3817,181 @@ async function autoClickRewards() {
       scan: lastScanSummary,
     });
 
+    async function processEdgeFlyoutDailySet() {
+      await appendDebugLog("info", "rewards", "Starting Edge flyout Daily Set fallback", { url });
+      let dailySetData = await fetchAndRestoreDailySet(null, { forceFresh: true });
+      if (!dailySetData || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
+        console.warn("[Rewards] Edge flyout Daily Set has no cards");
+        await appendDebugLog("warn", "rewards", "Edge flyout Daily Set has no cards");
+        return makeIncompleteOutcome("no_flyout_cards");
+      }
+
+      const incompleteCards = dailySetData.cards.filter((c) => !c.complete);
+      console.log(`[Rewards] Edge flyout Daily Set: ${dailySetData.cards.length} cards, ${incompleteCards.length} incomplete`);
+      await appendDebugLog("info", "rewards", "Edge flyout Daily Set status", {
+        totalCards: dailySetData.cards.length,
+        incompleteCards: incompleteCards.length,
+        streakDays: dailySetData.streakDays,
+      });
+
+      if (incompleteCards.length === 0) {
+        return {
+          status: "completed",
+          reason: "all_cards_completed",
+          elapsedMs: Date.now() - startedAt,
+          remainingMs: remainingMs(),
+          clickCount: 0,
+          scanCount: 1,
+          hydrationRetryCount: 0,
+          hydrationStatus: "hydrated",
+        };
+      }
+
+      for (const card of incompleteCards) {
+        if (timedOut()) break;
+        let targetUrl = card.destinationUrl;
+        if (!targetUrl) continue;
+        if (targetUrl.startsWith("/")) {
+          targetUrl = "https://www.bing.com" + targetUrl;
+        }
+
+        console.log(`[Rewards] Edge opening daily card: ${card.title || card.name} -> ${targetUrl}`);
+        await appendDebugLog("info", "rewards", "Opening Edge daily card", {
+          title: card.title || card.name,
+          targetUrl,
+          offerId: card.offerId,
+        });
+
+        let childTab = null;
+        try {
+          await enableRewardMobileEmulation();
+          childTab = await chrome.tabs.create({
+            url: targetUrl,
+            active: true,
+            windowId,
+          });
+          await waitForTabComplete(
+            childTab.id,
+            Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
+          );
+          await sleepWithinDeadline(2000);
+
+          const reportPayload = {
+            activityType: card.activityType || "bingredirect",
+            offerId: card.offerId || card.name || "",
+            authKey: card.hash || "",
+            userId: dailySetData.userId || "",
+          };
+
+          if (reportPayload.offerId && reportPayload.authKey) {
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: childTab.id },
+                world: "MAIN",
+                args: [REWARD_MOBILE_USER_AGENT, reportPayload],
+                func: async (ua, payload) => {
+                  try {
+                    Object.defineProperty(navigator, "userAgent", { get: () => ua, configurable: true });
+                    if (navigator.userAgentData) {
+                      Object.defineProperty(navigator.userAgentData, "mobile", { get: () => true, configurable: true });
+                      Object.defineProperty(navigator.userAgentData, "platform", { get: () => "Android", configurable: true });
+                    }
+                  } catch {}
+
+                  if (payload && payload.offerId && payload.authKey) {
+                    try {
+                      await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+                        method: "POST",
+                        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+                        credentials: "include",
+                        body: JSON.stringify({
+                          ActivityType: payload.activityType || "bingredirect",
+                          ActivitySubType: "",
+                          OfferId: payload.offerId,
+                          Channel: "BingFlyout",
+                          PartnerId: "BingRewards",
+                          UserId: payload.userId || "",
+                          AuthKey: payload.authKey,
+                          ActivityCount: 1,
+                        }),
+                      });
+                    } catch {}
+                  }
+                },
+              });
+            } catch (scriptErr) {
+              console.warn("[Rewards] Edge card script error:", scriptErr);
+            }
+          }
+
+          const quizResult = await awaitWithinDeadline(
+            handleRewardChildTab(childTab.id),
+            { handled: false, completed: false, reason: "deadline" },
+          );
+          if (quizResult?.handled) {
+            await appendDebugLog("info", "rewards", "Handled Edge daily card quiz", {
+              title: card.title,
+              completed: quizResult.completed,
+              clicks: quizResult.clicks,
+            });
+            await sleepWithinDeadline(2000);
+          } else if (!timedOut()) {
+            await awaitWithinDeadline(humanScrollOnTab(childTab.id), undefined);
+            if (!timedOut()) {
+              await waitForRewardSearchCredit(childTab.id, Math.min(8000, remainingMs()));
+            }
+          }
+
+          clickCount++;
+        } catch (err) {
+          console.warn("[Rewards] Edge daily card processing error:", err);
+        } finally {
+          await disableRewardMobileEmulation();
+          if (childTab?.id) {
+            try {
+              await chrome.tabs.remove(childTab.id);
+            } catch {}
+          }
+        }
+
+        await sleepWithinDeadline(2000);
+      }
+
+      try {
+        dailySetData = await fetchAndRestoreDailySet(null, { forceFresh: true });
+      } catch {}
+
+      // Auto-perform Visual Search on Edge if pending or needs activation
+      try {
+        const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" });
+        if (flyoutRes.ok) {
+          const flyoutHtml = await flyoutRes.text();
+          const yourActivity = extractYourActivityFromFlyoutHtml(flyoutHtml);
+          const vs = yourActivity?.activities?.find((a) => a.id === "visualsearch");
+          if (vs && !vs.completed) {
+            await appendDebugLog("info", "rewards", "Auto-executing Visual Search on Edge", { isEnabled: vs.isEnabled });
+            await performVisualSearch(windowId);
+          }
+        }
+      } catch (vsErr) {
+        console.warn("[Rewards] Visual Search execution error:", vsErr);
+      }
+
+      const remainingIncomplete = dailySetData?.cards?.filter((c) => !c.complete)?.length ?? 0;
+      const isCompleted = remainingIncomplete === 0;
+
+      return {
+        status: isCompleted ? "completed" : "incomplete",
+        reason: isCompleted ? "edge_flyout_daily_set_completed" : "cards_still_pending",
+        clickCount,
+        scanCount: 1,
+        elapsedMs: Date.now() - startedAt,
+        remainingMs: remainingMs(),
+        hydrationRetryCount: 0,
+        hydrationStatus: "hydrated",
+      };
+    }
+
     try {
       await ensureTabLoaded(tab.id, url);
       await ensureTabFocused(tab.id);
@@ -3842,6 +4027,12 @@ async function autoClickRewards() {
           browser: getBrowserName(),
           reason,
         });
+
+        if (isBlocked && /rewards\.bing\.com\/dashboard/i.test(url)) {
+          console.log("[Rewards] Edge blocked dashboard scripting. Processing Daily Set via Edge flyout fallback...");
+          return await processEdgeFlyoutDailySet();
+        }
+
         return makeIncompleteOutcome(reason);
       }
 
@@ -4749,6 +4940,23 @@ async function autoClickRewards() {
       });
     }
   }
+
+  // Check and perform Visual Search if not yet completed for today
+  try {
+    const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" });
+    if (flyoutRes.ok) {
+      const flyoutHtml = await flyoutRes.text();
+      const yourActivity = extractYourActivityFromFlyoutHtml(flyoutHtml);
+      const vs = yourActivity?.activities?.find((a) => a.id === "visualsearch");
+      if (vs && !vs.completed) {
+        await appendDebugLog("info", "rewards", "Auto-executing Visual Search after rewards run", { isEnabled: vs.isEnabled });
+        await performVisualSearch();
+      }
+    }
+  } catch (vsErr) {
+    console.warn("[Rewards] Visual Search execution check error:", vsErr);
+  }
+
   return rewardOutcomes;
 }
 globalThis.autoClickRewards = autoClickRewards;
@@ -4942,6 +5150,81 @@ async function ensureTabLoaded(tabId, expectedUrl, options = {}) {
     error: String(lastError),
   });
   throw lastError || new Error(`failed to load ${expectedUrl}`);
+}
+
+async function performVisualSearch(targetWindowId) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  await appendDebugLog("info", "rewards", "Starting Visual Search automation");
+  let tab = null;
+  try {
+    const createProps = {
+      url: "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES",
+      active: true,
+    };
+    if (targetWindowId) createProps.windowId = targetWindowId;
+    tab = await chrome.tabs.create(createProps);
+    if (!tab?.id) throw new Error("Failed to create visual search tab");
+
+    await waitForTabComplete(tab.id, 15000);
+    await sleep(2000);
+
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: async () => {
+        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+        const btn = document.querySelector("#sb_sbi");
+        if (btn) btn.click();
+        await delay(1200);
+
+        const input = document.querySelector("#sb_fileinput");
+        if (!input) return { ok: false, error: "file_input_missing" };
+
+        const canvas = document.createElement("canvas");
+        canvas.width = 100;
+        canvas.height = 100;
+        const ctx = canvas.getContext("2d");
+        const hue = Math.floor(Math.random() * 360);
+        ctx.fillStyle = `hsl(${hue}, 75%, 50%)`;
+        ctx.fillRect(0, 0, 100, 100);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(25, 25, 50, 50);
+
+        const dataUrl = canvas.toDataURL("image/png");
+        const b64 = dataUrl.split(",")[1];
+        const bin = atob(b64);
+        const u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+
+        const file = new File([u8], "vs_query.png", { type: "image/png" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return { ok: true };
+      },
+    });
+
+    const execRes = result?.[0]?.result;
+    if (!execRes?.ok) {
+      await appendDebugLog("warn", "rewards", "Visual search injection outcome", execRes);
+    }
+
+    // Wait for search navigation and reward registration
+    await sleep(8000);
+    await appendDebugLog("info", "rewards", "Visual search completed successfully");
+    return { ok: true };
+  } catch (err) {
+    console.error("[Rewards] Visual Search error:", err);
+    await appendDebugLog("error", "rewards", "Visual Search failed", { error: String(err) });
+    return { ok: false, error: String(err) };
+  } finally {
+    if (tab?.id) {
+      try {
+        await chrome.tabs.remove(tab.id);
+      } catch {}
+    }
+  }
 }
 
 async function openBingAndType(query) {
@@ -5480,9 +5763,21 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       const cached = await chrome.storage.local.get(["cachedDailySetData"]);
       const dailySet = cached?.cachedDailySetData;
       if (dailySet && Array.isArray(dailySet.cards)) {
-        const matchingCard = dailySet.cards.find(
-          (c) => c.hash && (url.includes(c.name) || (c.offerId && url.includes(c.offerId)))
-        );
+        const matchingCard = dailySet.cards.find((c) => {
+          if (!c.hash) return false;
+          if (c.name && url.includes(c.name)) return true;
+          if (c.offerId && url.includes(c.offerId)) return true;
+          if (c.destinationUrl) {
+            try {
+              const destU = new URL(c.destinationUrl);
+              const destQ = destU.searchParams.get("q");
+              if (destQ && url.includes(destQ)) return true;
+              const destSid = destU.searchParams.get("sid");
+              if (destSid && url.includes(destSid)) return true;
+            } catch {}
+          }
+          return false;
+        });
         if (matchingCard && !matchingCard.complete) {
           await chrome.scripting.executeScript({
             target: { tabId },
@@ -5538,9 +5833,66 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             if (data && data.cards.length > 0) {
               await chrome.storage.local.set({ cachedDailySetData: data, cachedDailySetDate: today });
             }
+            const actData = extractYourActivityFromFlyoutHtml(html);
+            if (actData && actData.activities?.length > 0) {
+              await chrome.storage.local.set({ cachedYourActivityData: actData, cachedYourActivityDate: today });
+            }
           }
         }
         sendResponse({ ok: true, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+  if (msg.type === "GET_YOUR_ACTIVITY") {
+    (async () => {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const cached = await chrome.storage.local.get(["cachedYourActivityData", "cachedYourActivityDate"]);
+        let data = cached?.cachedYourActivityData;
+        const cachedDate = cached?.cachedYourActivityDate;
+        if (!data || cachedDate !== today || !Array.isArray(data.activities) || data.activities.length === 0) {
+          const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+            credentials: "include",
+          });
+          if (flyoutRes.ok) {
+            const html = await flyoutRes.text();
+            data = extractYourActivityFromFlyoutHtml(html);
+            if (data && data.activities?.length > 0) {
+              await chrome.storage.local.set({ cachedYourActivityData: data, cachedYourActivityDate: today });
+            }
+            const dailySetData = extractDailySetFromFlyoutHtml(html);
+            if (dailySetData && dailySetData.cards?.length > 0) {
+              await chrome.storage.local.set({ cachedDailySetData: dailySetData, cachedDailySetDate: today });
+            }
+          }
+        }
+        sendResponse({ ok: true, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+  if (msg.type === "TRIGGER_VISUAL_SEARCH") {
+    (async () => {
+      try {
+        const outcome = await performVisualSearch();
+        const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+          credentials: "include",
+        });
+        let data = null;
+        if (flyoutRes.ok) {
+          const html = await flyoutRes.text();
+          data = extractYourActivityFromFlyoutHtml(html);
+          const today = new Date().toISOString().slice(0, 10);
+          if (data && data.activities?.length > 0) {
+            await chrome.storage.local.set({ cachedYourActivityData: data, cachedYourActivityDate: today });
+          }
+        }
+        sendResponse({ ok: outcome?.ok ?? true, outcome, data });
       } catch (e) {
         sendResponse({ ok: false, error: String(e) });
       }
