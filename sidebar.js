@@ -161,12 +161,141 @@ async function openSidebar() {
   await chrome.sidePanel.open({ windowId: currentWindow.id });
 }
 
+function escapeHtml(str) {
+  return String(str || "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]);
+}
+
+async function loadDailySet() {
+  const container = document.getElementById("dailySetCard");
+  const list = document.getElementById("dailySetList");
+  const streakEl = document.getElementById("dailySetStreak");
+  if (!container || !list) return;
+
+  chrome.runtime.sendMessage({ type: "GET_RESTORED_DAILY_SET" }, (res) => {
+    if (chrome.runtime.lastError || !res?.ok || !res?.data?.cards?.length) {
+      container.style.display = "none";
+      return;
+    }
+    const data = res.data;
+    container.style.display = "block";
+    if (streakEl) {
+      streakEl.textContent = data.streakDays !== undefined ? `🔥 ${data.streakDays} day streak` : "";
+    }
+    list.innerHTML = "";
+    data.cards.forEach((card, idx) => {
+      const cardEl = document.createElement("div");
+      cardEl.className = "row";
+      cardEl.style.cssText = "padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); margin: 0;";
+      const isDone = card.complete;
+      const title = card.title || card.name || `Activity ${idx + 1}`;
+      const pts = card.max || card.points || 10;
+      cardEl.innerHTML = `
+        <div style="flex: 1; min-width: 0;">
+          <div style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+          <div style="font-size: 11px; color: var(--muted);">${pts} points</div>
+        </div>
+        <div>
+          ${isDone
+            ? '<span style="color: var(--ok); font-weight: 600; font-size: 12px;">✓ Completed</span>'
+            : `<button type="button" class="open-card-btn" data-url="${escapeHtml(card.destinationUrl || "")}" style="font-size: 12px; padding: 4px 8px;">Open</button>`}
+        </div>
+      `;
+      list.appendChild(cardEl);
+    });
+
+    list.querySelectorAll(".open-card-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        let u = e.currentTarget.getAttribute("data-url");
+        if (u) {
+          if (u.startsWith("/")) u = "https://www.bing.com" + u;
+          chrome.tabs.create({ url: u, active: true });
+        }
+      });
+    });
+  });
+}
+
+async function loadYourActivity() {
+  const container = document.getElementById("yourActivityCard");
+  const list = document.getElementById("yourActivityList");
+  const streakEl = document.getElementById("yourActivityStreak");
+  if (!container || !list) return;
+
+  chrome.runtime.sendMessage({ type: "GET_YOUR_ACTIVITY" }, (res) => {
+    if (chrome.runtime.lastError || !res?.ok || !res?.data?.activities?.length) {
+      container.style.display = "none";
+      return;
+    }
+    const data = res.data;
+    container.style.display = "block";
+    if (streakEl) {
+      streakEl.textContent = data.streakDays ? `🔥 ${data.streakDays} day streak` : "";
+    }
+    list.innerHTML = "";
+    data.activities.forEach((act) => {
+      const actEl = document.createElement("div");
+      actEl.className = "row";
+      actEl.style.cssText = "padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); margin: 0;";
+      const isDone = act.completed;
+      const streakBadge = act.streak > 0 ? `<span style="color: #ff922b; font-size: 11px; margin-left: 6px;">🔥 ${act.streak}</span>` : "";
+      const statusText = !act.isEnabled && !isDone ? "How to activate" : (act.progressLabel || (isDone ? "1/1" : "0/1"));
+
+      let actionHtml = "";
+      if (isDone) {
+        actionHtml = '<span style="color: var(--ok); font-weight: 600; font-size: 12px;">✓ Completed</span>';
+      } else if (act.id === "visualsearch") {
+        actionHtml = '<button type="button" class="vs-search-btn" style="font-size: 12px; padding: 4px 8px;">Search</button>';
+      } else if (act.destinationUrl) {
+        actionHtml = `<button type="button" class="open-act-btn" data-url="${escapeHtml(act.destinationUrl)}" style="font-size: 12px; padding: 4px 8px;">Open</button>`;
+      }
+
+      actEl.innerHTML = `
+        <div style="flex: 1; min-width: 0;">
+          <div style="font-size: 13px; font-weight: 500; display: flex; align-items: center;">
+            <span>${escapeHtml(act.name)}</span>
+            ${streakBadge}
+          </div>
+          <div style="font-size: 11px; color: var(--muted);">${escapeHtml(statusText)}</div>
+        </div>
+        <div>
+          ${actionHtml}
+        </div>
+      `;
+      list.appendChild(actEl);
+    });
+
+    list.querySelectorAll(".open-act-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        let u = e.currentTarget.getAttribute("data-url");
+        if (u) {
+          if (u.startsWith("/")) u = "https://www.bing.com" + u;
+          chrome.tabs.create({ url: u, active: true });
+        }
+      });
+    });
+
+    list.querySelectorAll(".vs-search-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const b = e.currentTarget;
+        b.disabled = true;
+        b.textContent = "Searching...";
+        chrome.runtime.sendMessage({ type: "TRIGGER_VISUAL_SEARCH" }, () => {
+          if (chrome.runtime.lastError) {}
+          loadYourActivity();
+        });
+      });
+    });
+  });
+}
+
 async function load() {
   const { enabled, time, nextRunAt } = await chrome.storage.sync.get(["enabled", "time", "nextRunAt"]);
   document.getElementById("enabled").checked = enabled !== false;
   document.getElementById("time").textContent = time || "01:00";
   document.getElementById("next").textContent = nextRunAt ? formatDate(nextRunAt) : "—";
   await loadLogs();
+  await loadDailySet();
+  await loadYourActivity();
 
   const openSidebarButton = document.getElementById("openSidebar");
   if (openSidebarButton) {
@@ -194,8 +323,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
   }
 
-  if (area === "local" && changes[DEBUG_LOGS_KEY]) {
-    renderLogs(changes[DEBUG_LOGS_KEY].newValue || []);
+  if (area === "local") {
+    if (changes[DEBUG_LOGS_KEY]) {
+      renderLogs(changes[DEBUG_LOGS_KEY].newValue || []);
+    }
+    if (changes.cachedDailySetData) {
+      loadDailySet();
+    }
+    if (changes.cachedYourActivityData) {
+      loadYourActivity();
+    }
   }
 });
 

@@ -1,12 +1,16 @@
 // Use as an ES module for MV3 service worker
 import { buildQueries } from "./words.js";
 import {
+  CLAIM_MATCH_RE,
   EMPTY_REWARD_STABLE_MS,
+  READY_TO_CLAIM_LABEL_RE,
   QUIZ_COMPLETION_RE,
   buildQuestActivityKey,
   buildQuestCardKey,
   buildRewardCardKey,
   classifyRewardScanState,
+  extractDailySetFromFlyoutHtml,
+  extractYourActivityFromFlyoutHtml,
   getRewardHydrationRetryDelay,
   isActionableQuestActivity,
   isActionableRewardCard,
@@ -22,7 +26,8 @@ const ALARM_NAME = "bingScheduler";
 const BADGE_ALARM = "badgeTick";
 const REWARDS_SETTLE_MS = 8000;
 const REWARD_CHILD_SYNC_MS = 5000;
-const REWARD_URL_TIMEOUT_MS = 480000;
+const REWARD_URL_TIMEOUT_MS = 360000;
+const MIN_QUEST_REMAINING_BUDGET_MS = 60000;
 const DEBUG_LOGS_KEY = 'debugLogs';
 const DEBUG_LOG_RETENTION_DAYS = 7;
 const DEBUG_LOG_RETENTION_MS = DEBUG_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -74,7 +79,7 @@ async function ensureTabFocused(tabId) {
 const DEFAULTS = {
   enabled: true,
   time: DEFAULT_RUN_TIME, // 24h HH:MM
-  searchesPerRun: 50, // how many queries to open per run
+  searchesPerRun: 4, // how many queries to open per run (reduced to 4 per user request)
   intervalMin: 10, // min seconds between tabs
   intervalMax: 120, // max seconds between tabs
   customQueriesRaw: "", // newline or comma separated list
@@ -340,7 +345,7 @@ function isProtectedPageScriptError(error) {
   const message = String(error?.message || error?.originalError?.message || error || "");
   return (
     error?.code === "PAGE_SCRIPTING_BLOCKED" ||
-    /extensions gallery cannot be scripted/i.test(message)
+    /extensions gallery cannot be scripted|cannot be scripted by extensions|cannot access a (?:chrome|edge):\/\/|protected page/i.test(message)
   );
 }
 
@@ -397,11 +402,13 @@ async function injectDomHelpers(tabId) {
   });
 
   await executeRewardsScript(tabId, {
-    args: [EMPTY_REWARD_STABLE_MS],
-    func: (emptyRewardStableMs) => {
+    args: [EMPTY_REWARD_STABLE_MS, READY_TO_CLAIM_LABEL_RE.source, CLAIM_MATCH_RE.source],
+    func: (emptyRewardStableMs, readyToClaimSource, claimMatchSource) => {
       const helpersReady =
         typeof window.normalizeRewardText === "function" &&
         typeof window.isCompletedText === "function" &&
+        typeof window.collectProgressRatioMatches === "function" &&
+        typeof window.isCompletedQuestText === "function" &&
         typeof window.isActionableRewardCard === "function" &&
         typeof window.buildRewardCardKey === "function" &&
         typeof window.buildQuestCardKey === "function" &&
@@ -409,8 +416,15 @@ async function injectDomHelpers(tabId) {
         typeof window.buildQuestActivityKey === "function" &&
         typeof window.isDashboardRewardHref === "function" &&
         typeof window.findRewardCardRoots === "function" &&
+        typeof window.expandRewardSection === "function" &&
         typeof window.isRewardSectionChrome === "function" &&
-        typeof window.shouldFinishEmptyRewardScan === "function";
+        typeof window.shouldFinishEmptyRewardScan === "function" &&
+        typeof window.parsePointsFromText === "function" &&
+        typeof window.isCardCompleted === "function" &&
+        window.READY_TO_CLAIM_LABEL_RE instanceof RegExp &&
+        window.READY_TO_CLAIM_LABEL_RE.source === readyToClaimSource &&
+        window.CLAIM_MATCH_RE instanceof RegExp &&
+        window.CLAIM_MATCH_RE.source === claimMatchSource;
       if (window.__rewardDomHelpersInjected && helpersReady) return;
       window.__rewardDomHelpersInjected = true;
 
@@ -418,11 +432,139 @@ async function injectDomHelpers(tabId) {
         return (value || "").replace(/\s+/g, " ").trim();
       };
 
+      window.READY_TO_CLAIM_LABEL_RE = new RegExp(readyToClaimSource, "i");
+      window.CLAIM_MATCH_RE = new RegExp(claimMatchSource, "i");
+
+      window.parsePointsFromText = function parsePointsFromText(text) {
+        const input = typeof text === "string" ? text : String(text ?? "");
+        // 1. Explicit points with keyword or plus (e.g. "+6", "6 points", "+1,000 pts")
+        const pointMatch =
+          input.match(/(?:\+\s*|\b)(\d[\d,.]*)\s*(?:points?|pts?)\b/i) ||
+          input.match(/\+\s*(\d[\d,.]*)\b(?!\s*(?:days?|hours?|hrs?|mins?|minutes?|ngày|giờ|phút|streak|friends?|bạn)(?:[\s,.]|$))/i);
+        if (pointMatch) {
+          const parsed = Number(pointMatch[1].replace(/[,.]/g, ""));
+          if (Number.isFinite(parsed)) return parsed;
+        }
+        // 2. Ready to claim / Claim card context: number near claim / pending (e.g. "Ready to claim 6 Claim", "6 Pending", "Ready to claim: +50")
+        const contextualMatch =
+          input.match(
+            /(?:ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению|\bclaim\b|\bnhận\b|\breclamar\b|\beinlösen\b|\bpending\b)(?:\s+(?:points?|pts?|điểm|puntos))?[\s!:+\-]*\b(\d[\d,.]*)\b(?!\s*(?:days?|hours?|hrs?|mins?|minutes?|ngày|giờ|phút|of\b|\/\s*\d+)(?:[\s,.]|$))/i,
+          ) ||
+          input.match(/\b(\d[\d,.]*)\b[\s!:+\-]*(?:\bpending\b|\bclaim\b|\bnhận\b|\breclamar\b|\beinlösen\b)(?!\w)/i);
+        if (contextualMatch) {
+          const parsed = Number(contextualMatch[1].replace(/[,.]/g, ""));
+          if (Number.isFinite(parsed)) return parsed;
+        }
+        // 3. Standalone short number
+        const standaloneMatch = input.trim().match(/^(\d[\d,.]*)$/);
+        if (standaloneMatch) {
+          const parsed = Number(standaloneMatch[1].replace(/[,.]/g, ""));
+          if (Number.isFinite(parsed)) return parsed;
+        }
+        return 0;
+      };
+
       const COMPLETED_RE =
         /\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e/i;
 
       window.isCompletedText = function isCompletedText(value) {
         return COMPLETED_RE.test(window.normalizeRewardText(value).toLowerCase());
+      };
+
+      window.collectProgressRatioMatches = function collectProgressRatioMatches(text) {
+        if (!text) return [];
+        return [
+          ...text.matchAll(/(?<![\/\d])\b(\d+)\s*\/\s*([1-9]\d*)\b(?:\s+(?:tasks?|points?|pts?|quests?|activities|hoạt động|nhiệm vụ|tareas?|activités?|aufgaben))(?!\s*[\/\d])/gi),
+          ...text.matchAll(/\b(?:quests?|nhiệm vụ|hoạt động|tareas?|activités?|aufgaben)\s+(\d+)\s*\/\s*([1-9]\d*)\b(?!\s*[\/\d])/gi),
+          ...text.matchAll(/(?:\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e)[\s!:()\-–—[\]]*(\d+)\s*\/\s*([1-9]\d*)\b(?!\s*[\/\d])/gi),
+          ...text.matchAll(/(?<![\/\d])\b(\d+)\s*\/\s*([1-9]\d*)[\s!:()\-–—[\]]*(?:\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong|\u5df2\u5b8c\u6210|\u5b8c\u4e86|termin\u00e9|abgeschlossen|completado|\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e)/gi),
+        ];
+      };
+
+      window.isCompletedQuestText = function isCompletedQuestText(value) {
+        const text = window.normalizeRewardText(value);
+        if (!text) return false;
+
+        // 1. Collect all explicit progress ratio matches (tasks, points, quests, activities, completed prefix/suffix)
+        const allRatioMatches = window.collectProgressRatioMatches(text);
+        if (allRatioMatches.length > 0) {
+          return allRatioMatches.every((m) => Number(m[1]) >= Number(m[2]));
+        }
+
+        // 2. If no explicit ratios found, inspect completion keywords
+        if (window.isCompletedText(text)) return true;
+
+        // 3. Standalone ratio badge (e.g. "1/1", "5/5")
+        const exactRatioMatch = text.match(/^(\d+)\s*\/\s*([1-9]\d*)$/);
+        if (exactRatioMatch) {
+          return Number(exactRatioMatch[1]) >= Number(exactRatioMatch[2]);
+        }
+
+        return false;
+      };
+
+      window.isCardCompleted = function isCardCompleted(cardEl) {
+        if (!cardEl) return false;
+        if (cardEl.getAttribute?.("data-ext-completed") === "true") return true;
+        if (cardEl.querySelector?.("[data-ext-completed='true']")) return true;
+        const BADGE_SELECTOR =
+          "[class*='statusSuccess'], [class*='Success'], [class*='CheckMark'], [class*='checkMark']";
+        const DIRECT_BADGE_SELECTOR =
+          "svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], svg[class*='Success'], mee-icon[class*='Success'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']";
+
+        const matchedList = cardEl.querySelectorAll?.(BADGE_SELECTOR);
+        let matchedElements = [];
+        if (matchedList) {
+          matchedElements = Array.from(matchedList);
+        } else {
+          const single = cardEl.querySelector?.(BADGE_SELECTOR);
+          if (single) matchedElements = [single];
+        }
+
+        const badgeElements = [
+          ...(typeof cardEl.matches === "function" && cardEl.matches(DIRECT_BADGE_SELECTOR) ? [cardEl] : []),
+          ...matchedElements,
+        ];
+
+        for (const successBadge of badgeElements) {
+          const isDirectIcon =
+            successBadge.tagName?.toLowerCase() === "svg" ||
+            successBadge.tagName?.toLowerCase() === "mee-icon";
+          const classStr =
+            typeof successBadge.className === "string"
+              ? successBadge.className
+              : successBadge.getAttribute?.("class") || "";
+          const hasCheckmarkClass = /mee-icon-CheckMark|\bcheck-?mark\b/i.test(classStr);
+          const hasSuccessClass = /Success/i.test(classStr);
+
+          if (isDirectIcon && (hasCheckmarkClass || hasSuccessClass)) {
+            return true;
+          }
+          if (
+            successBadge !== cardEl &&
+            (hasCheckmarkClass || hasSuccessClass) &&
+            Boolean(successBadge.querySelector?.(DIRECT_BADGE_SELECTOR))
+          ) {
+            return true;
+          }
+        }
+
+        const statusEls =
+          cardEl.querySelectorAll?.(
+            "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
+          ) || [];
+        for (const el of statusEls) {
+          const t = typeof window.normalizeRewardText === "function"
+            ? window.normalizeRewardText(el.textContent || "")
+            : (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (typeof window.isCompletedQuestText === "function") {
+            if (window.isCompletedQuestText(t)) return true;
+          } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+            return true;
+          }
+        }
+
+        return false;
       };
 
       window.isDashboardRewardHref = function isDashboardRewardHref(href) {
@@ -453,10 +595,14 @@ async function injectDomHelpers(tabId) {
       const QUEST_META_RE = /^(status:|expires:|tr\u1ea1ng th\u00e1i:|h\u1ebft h\u1ea1n:)/i;
       const QUEST_CHROME_RE = /^(feedback|privacy|terms|microsoft|bing|search)$/i;
       const QUEST_CLOSE_RE = /^(back|close|quay l\u1ea1i|\u0111\u00f3ng|zur\u00fcck|schlie\u00dfen|retour|fermer|volver|cerrar)$/i;
+      const QUEST_INFO_RE =
+        /^(?:about(?:\s+(?:this\s+)?(?:quest|daily set|rewards|activities))?|về(?:\s+(?:nhiệm vụ|hoạt động))?|level up activities)$/i;
+      const QUEST_STREAK_RE = /\b(?:\d+\s+days\s+in\s+a\s+row|for\s+\d+\s+days|streak)\b/i;
 
       window.isActionableRewardCard = function isActionableRewardCard(meta) {
         const href = meta.href || "";
         const text = window.normalizeRewardText(meta.text).toLowerCase();
+        const hasValidHref = Boolean(href && !/^(?:#|javascript:)/i.test(href.trim()));
 
         if (meta.isVisible === false) return false;
         if (meta.isDisabled) return false;
@@ -466,12 +612,18 @@ async function injectDomHelpers(tabId) {
         if (meta.isSectionChrome) return false;
         if (!meta.hasVisual) return false;
         if (!text) return false;
-        if (!href && !meta.isPressable) return false;
+        if (!hasValidHref && !meta.isPressable) return false;
         if (meta.isHeader) return false;
-        if (/^(?:https?:\/\/rewards\.bing\.com)?\/earn\/?(?:[?#].*)?$/i.test(href)) return false;
+        if (/^(?:https?:\/\/rewards\.bing\.com)?\/(?:earn|about|redeem|refer|status|optout)\/?(?:[?#].*)?$/i.test(href)) return false;
         // Only skip short navigation buttons like "Earn more" or "See more tasks",
         // NOT cards whose longer description happens to contain these phrases.
         if (/^(see more tasks|earn more)$/i.test(text.replace(/\s+/g, " ").trim())) return false;
+        if (!hasValidHref) {
+          const compactText = text.replace(/\s+/g, " ").trim();
+          if (/^\+?\d+(?:\s*(?:pts?|points?|days?|ngày))?$/i.test(compactText)) return false;
+          if (/^(?:(?:\+?\d[\d,.]*\s+)?bonus|.*streak|level up activities)$/i.test(compactText)) return false;
+          if (/\b\d+\s+days\s+in\s+a\s+row\b/i.test(compactText)) return false;
+        }
 
         return true;
       };
@@ -485,13 +637,19 @@ async function injectDomHelpers(tabId) {
         return `${href || "btn"}|${window.normalizeRewardText(text).toLowerCase()}`;
       };
 
-      window.isActionableQuestActivity = function isActionableQuestActivity(meta) {
+      window.isActionableQuestActivity = function isActionableQuestActivity(meta = {}) {
         const innerLabel = window.normalizeRewardText(meta.innerLabel);
         const ariaLabel = window.normalizeRewardText(meta.ariaLabel);
         const label = window.normalizeRewardText(`${ariaLabel} ${innerLabel}`).toLowerCase();
 
         if (meta.isVisible === false) return false;
-        if (meta.isDisabled) return false;
+        const hasValidHref = Boolean(meta.href && !/^(?:#|javascript:)/i.test(meta.href.trim()));
+        const isExclusiveApp =
+          meta.isExclusiveAppCard ||
+          /\b(?:rewards\s+app|bing\s+app|exclusive)\b/i.test(label) ||
+          /[?&](?:PUBL=RewardsDO|form=ML2Y2H|rnoreward=1)\b/i.test(meta.href || "");
+
+        if (meta.isDisabled && (!isExclusiveApp || !hasValidHref)) return false;
         if (meta.isInNav) return false;
         if (meta.isQuestCard) return false;
         if (!label) return false;
@@ -499,7 +657,33 @@ async function injectDomHelpers(tabId) {
         if (QUEST_META_RE.test(label)) return false;
         if (QUEST_CHROME_RE.test(label)) return false;
         if (QUEST_CLOSE_RE.test(innerLabel)) return false;
-        if (meta.isCompleted) return false;
+        if (QUEST_INFO_RE.test(innerLabel) || QUEST_INFO_RE.test(ariaLabel) || QUEST_INFO_RE.test(label)) return false;
+        if (!hasValidHref && !meta.isPressable) return false;
+        if (!hasValidHref && QUEST_STREAK_RE.test(label)) return false;
+
+        if (meta.hasSuccessBadge) return false;
+
+        const standaloneRatioMatches = [innerLabel, ariaLabel, label]
+          .map((str) => (str || "").match(/^(\d+)\s*\/\s*([1-9]\d*)$/))
+          .filter(Boolean);
+
+        const hasIncompleteRatio = [
+          ...window.collectProgressRatioMatches(label),
+          ...standaloneRatioMatches,
+        ].some((m) => Number(m[1]) < Number(m[2]));
+
+        if (hasIncompleteRatio) {
+          return true;
+        }
+
+        if (
+          meta.isCompleted ||
+          window.isCompletedQuestText(label) ||
+          window.isCompletedQuestText(innerLabel) ||
+          window.isCompletedQuestText(ariaLabel)
+        ) {
+          return false;
+        }
 
         return true;
       };
@@ -514,6 +698,147 @@ async function injectDomHelpers(tabId) {
   });
 }
 
+async function fetchAndRestoreDailySet(tabId, { forceFresh = false } = {}) {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const cached = await chrome.storage.local.get(["cachedDailySetData", "cachedDailySetDate"]);
+    let dailySetData = cached?.cachedDailySetData;
+    const cachedDate = cached?.cachedDailySetDate;
+
+    if (forceFresh || !dailySetData || cachedDate !== today || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
+      if (forceFresh || cachedDate !== today) {
+        dailySetData = null;
+      }
+      const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+        credentials: "include",
+      });
+      if (flyoutRes.ok) {
+        const flyoutHtml = await flyoutRes.text();
+        dailySetData = extractDailySetFromFlyoutHtml(flyoutHtml);
+        if (dailySetData && dailySetData.cards.length > 0) {
+          await chrome.storage.local.set({ cachedDailySetData: dailySetData, cachedDailySetDate: today });
+        }
+      }
+    }
+
+    if (dailySetData && dailySetData.cards.length > 0) {
+      console.log(
+        `[Rewards] Restoring daily set: ${dailySetData.cards.length} cards, streak: ${dailySetData.streakDays} days, forceFresh=${forceFresh}`,
+      );
+      try {
+        if (tabId) {
+          await injectDomHelpers(tabId);
+          await executeRewardsScript(tabId, {
+            args: [dailySetData, forceFresh],
+            func: (data, force) => {
+              if (typeof window.ensurePersistentDailySet === "function") {
+                return window.ensurePersistentDailySet(data, force);
+              }
+              if (typeof window.injectRestoredDailySet === "function") {
+                return window.injectRestoredDailySet(data, force);
+              }
+              return false;
+            },
+          });
+        }
+      } catch (domErr) {
+        if (!isProtectedPageScriptError(domErr)) throw domErr;
+        // Edge blocks scripting on rewards.bing.com; dailySetData is cached in storage for popup/sidebar
+      }
+
+      // Background revalidation to keep data fresh without blocking UI
+      if (!forceFresh) {
+        fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" })
+          .then((r) => (r.ok ? r.text() : ""))
+          .then((html) => {
+            if (!html) return;
+            const freshData = extractDailySetFromFlyoutHtml(html);
+            if (freshData && freshData.cards.length > 0) {
+              chrome.storage.local.set({ cachedDailySetData: freshData, cachedDailySetDate: today });
+              if (tabId) {
+                executeRewardsScript(tabId, {
+                  args: [freshData, true],
+                  func: (data, force) => {
+                    if (typeof window.ensurePersistentDailySet === "function") {
+                      window.ensurePersistentDailySet(data, force);
+                    }
+                  },
+                }).catch(() => {});
+              }
+            }
+          })
+          .catch(() => {});
+      }
+
+      return dailySetData;
+    }
+  } catch (err) {
+    console.warn("[Rewards] fetchAndRestoreDailySet failed:", err);
+  }
+  return null;
+}
+globalThis.fetchAndRestoreDailySet = fetchAndRestoreDailySet;
+globalThis.extractDailySetFromFlyoutHtml = extractDailySetFromFlyoutHtml;
+
+const REWARD_MOBILE_DNR_RULE_ID = 9021;
+const REWARD_MOBILE_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 EdgA/130.0.0.0";
+
+async function enableRewardMobileEmulation() {
+  if (!chrome.declarativeNetRequest?.updateSessionRules) return;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [REWARD_MOBILE_DNR_RULE_ID],
+      addRules: [
+        {
+          id: REWARD_MOBILE_DNR_RULE_ID,
+          priority: 2,
+          action: {
+            type: "modifyHeaders",
+            requestHeaders: [
+              { header: "User-Agent", operation: "set", value: REWARD_MOBILE_USER_AGENT },
+              { header: "sec-ch-ua-mobile", operation: "set", value: "?1" },
+              { header: "sec-ch-ua-platform", operation: "set", value: '"Android"' },
+              {
+                header: "sec-ch-ua",
+                operation: "set",
+                value: '"Chromium";v="130", "Microsoft Edge";v="130", "Not?A_Brand";v="99"',
+              },
+            ],
+          },
+          condition: {
+            urlFilter: "||bing.com/*",
+            resourceTypes: [
+              "main_frame",
+              "sub_frame",
+              "xmlhttprequest",
+              "fetch",
+              "other",
+            ],
+          },
+        },
+      ],
+    });
+    console.log("[Rewards] Mobile emulation DNR session rule enabled for Bing search");
+  } catch (err) {
+    console.warn("[Rewards] Failed to enable mobile emulation DNR rule:", err);
+  }
+}
+
+async function disableRewardMobileEmulation() {
+  if (!chrome.declarativeNetRequest?.updateSessionRules) return;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [REWARD_MOBILE_DNR_RULE_ID],
+    });
+    console.log("[Rewards] Mobile emulation DNR session rule disabled");
+  } catch (err) {
+    console.warn("[Rewards] Failed to disable mobile emulation DNR rule:", err);
+  }
+}
+globalThis.enableRewardMobileEmulation = enableRewardMobileEmulation;
+globalThis.disableRewardMobileEmulation = disableRewardMobileEmulation;
+
 async function autoClickRewards() {
   console.log("⚡ Auto-clicking Bing Rewards cards...");
   await appendDebugLog("info", "rewards", "Rewards phase started");
@@ -525,6 +850,7 @@ async function autoClickRewards() {
 
   async function claimReadyPoints(tabId) {
     try {
+      await injectDomHelpers(tabId);
       const scriptResults =
         await executeRewardsScript(tabId, {
           func: async () => {
@@ -580,37 +906,54 @@ async function autoClickRewards() {
             return results;
           };
 
+          const centerPoint = (el) => {
+            const rect = el.getBoundingClientRect();
+            return {
+              clientX: Math.round(rect.left + Math.max(rect.width / 2, 1)),
+              clientY: Math.round(rect.top + Math.max(rect.height / 2, 1)),
+            };
+          };
+
           const clickElement = (el) => {
             if (!el) return false;
             try {
               el.scrollIntoView({ behavior: "instant", block: "center" });
             } catch { }
 
-            const eventTypes = [
-              "pointerover",
-              "pointerdown",
-              "mousedown",
-              "pointerup",
-              "mouseup",
-              "click",
+            try {
+              if (typeof el.focus === "function") el.focus();
+            } catch { }
+
+            const pt = centerPoint(el);
+            const common = {
+              view: window,
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              clientX: pt.clientX,
+              clientY: pt.clientY,
+              screenX: pt.clientX,
+              screenY: pt.clientY,
+            };
+
+            const PointerCtor = typeof PointerEvent !== "undefined" ? PointerEvent : MouseEvent;
+            const sequence = [
+              ["pointerover", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: 0 }],
+              ["pointerenter", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: 0 }],
+              ["mouseover", MouseEvent, { button: 0, buttons: 0 }],
+              ["mouseenter", MouseEvent, { button: 0, buttons: 0 }],
+              ["pointermove", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: 0 }],
+              ["mousemove", MouseEvent, { button: 0, buttons: 0 }],
+              ["pointerdown", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0.5, button: 0, buttons: 1 }],
+              ["mousedown", MouseEvent, { button: 0, buttons: 1 }],
+              ["pointerup", PointerCtor, { pointerId: 1, isPrimary: true, pointerType: "mouse", pressure: 0, button: 0, buttons: 0 }],
+              ["mouseup", MouseEvent, { button: 0, buttons: 0 }],
+              ["click", MouseEvent, { button: 0, buttons: 0 }],
             ];
-            for (const type of eventTypes) {
+
+            for (const [type, Ctor, extra] of sequence) {
               try {
-                const EventCtor =
-                  type.startsWith("pointer") && typeof PointerEvent === "function"
-                    ? PointerEvent
-                    : MouseEvent;
-                el.dispatchEvent(
-                  new EventCtor(type, {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    pointerId: 1,
-                    isPrimary: true,
-                    button: 0,
-                    buttons: 1,
-                  }),
-                );
+                el.dispatchEvent(new Ctor(type, { ...common, ...extra }));
               } catch { }
             }
 
@@ -620,96 +963,155 @@ async function autoClickRewards() {
             return true;
           };
 
+          const isSingleActivity = (el) => {
+            if (!el || !(el instanceof HTMLElement)) return false;
+            if (el.matches?.("section, body, #dailyset, #moreactivities, #ext-restored-dailyset")) return false;
+            if (typeof window.findRewardCardRoots !== "function") {
+              return Boolean(el.matches?.("button, [role='button'], [data-react-aria-pressable='true'], a"));
+            }
+            const roots = window.findRewardCardRoots(el);
+            const count = roots.length === 0 && el.matches?.("button, [role='button'], [data-react-aria-pressable='true'], a") ? 1 : roots.length;
+            return count === 1;
+          };
+
           const findReadyToClaimCard = () => {
-            const elements = collectAllElements(document);
-            const labels = elements.filter((el) => {
-              if (!(el instanceof HTMLElement)) return false;
-              if (!isVisible(el)) return false;
-              return /^ready to claim$|^sẵn sàng nhận$|^可领取$|^prêt à réclamer$|^bereit zum einlösen$|^listo para reclamar$|^готово к получению$/i.test(getNodeText(el).toLowerCase());
-            });
+            const allButtons = Array.from(
+              document.querySelectorAll("button, [role='button'], [data-react-aria-pressable='true'], a"),
+            );
+            for (const directCard of allButtons) {
+              if (!isVisible(directCard) || directCard.disabled || directCard.getAttribute("aria-disabled") === "true") continue;
+              const text = getNodeText(directCard);
+              const matchesLabel = window.READY_TO_CLAIM_LABEL_RE
+                ? window.READY_TO_CLAIM_LABEL_RE.test(text)
+                : /ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению/i.test(text);
+              if (!matchesLabel) continue;
 
-            for (const labelEl of labels) {
-              const cardButton = labelEl.closest(
-                "button, [role='button'], a[role='button']",
-              );
-              if (!cardButton || !isVisible(cardButton)) continue;
+              let points = typeof window.parsePointsFromText === "function"
+                ? window.parsePointsFromText(text)
+                : 0;
+              let cardContainer = directCard;
 
-              const text = getNodeText(cardButton);
-              const matches = Array.from(
-                text.matchAll(/\b\d[\d,.]*\b/g),
-                (m) => m[0],
-              );
-              const numericValues = matches
-                .map((value) => Number(value.replace(/[,.]/g, "")))
-                .filter((value) => Number.isFinite(value));
-              const points = numericValues.length ? Math.max(...numericValues) : 0;
+              if (points === 0 && !/\d/.test(text)) {
+                const parentCard = directCard.parentElement?.closest?.(
+                  "[data-reward-card-name], [data-offer-id], [class*='rounded-cornerCardDefault'], [class*='card' i], [data-rac]:not(section):not(body), article, li",
+                );
+                if (parentCard && parentCard !== directCard && isSingleActivity(parentCard)) {
+                  const containerText = getNodeText(parentCard);
+                  const parentPoints = typeof window.parsePointsFromText === "function"
+                    ? window.parsePointsFromText(containerText)
+                    : 0;
+                  if (parentPoints > 0) {
+                    points = parentPoints;
+                    cardContainer = parentCard;
+                  }
+                }
+              }
 
               if (points > 0) {
-                return { cardButton, points };
+                return {
+                  cardButton: directCard,
+                  cardContainer,
+                  points,
+                };
+              }
+            }
+
+            const elements = collectAllElements(document);
+            const candidates = elements.filter((el) => {
+              if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
+              if (el.children.length > 2) return false;
+              if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+              const text = getNodeText(el);
+              return /ready to claim|sẵn sàng nhận|可领取|prêt à réclamer|bereit zum einlösen|listo para reclamar|готово к получению/i.test(text);
+            });
+
+            for (const cand of candidates) {
+              const cardContainer =
+                cand.closest(
+                  "button, [role='button'], [data-react-aria-pressable='true'], [data-reward-card-name], [data-offer-id], [class*='rounded-cornerCardDefault'], [class*='card' i], [data-rac]:not(section):not(body), article, li",
+                ) || cand.parentElement;
+              if (!cardContainer || !isVisible(cardContainer) || !isSingleActivity(cardContainer)) continue;
+
+              const clickable =
+                cardContainer.querySelector(
+                  "button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]",
+                ) ||
+                (cardContainer.matches?.("button, [role='button'], a[role='button'], [data-react-aria-pressable='true'], a[href]")
+                  ? cardContainer
+                  : cand);
+
+              const actionText = getNodeText(clickable) || getNodeText(cand);
+              let points = typeof window.parsePointsFromText === "function"
+                ? window.parsePointsFromText(actionText)
+                : 0;
+
+              if (points === 0 && !/\d/.test(actionText)) {
+                if (cardContainer !== clickable) {
+                  const containerText = getNodeText(cardContainer);
+                  const containerPoints = typeof window.parsePointsFromText === "function"
+                    ? window.parsePointsFromText(containerText)
+                    : 0;
+                  if (containerPoints > 0) {
+                    points = containerPoints;
+                  }
+                }
+              }
+
+              if (points > 0) {
+                return {
+                  cardButton: clickable,
+                  cardContainer,
+                  points,
+                };
               }
             }
 
             return null;
           };
 
-          const findDialogClaimButton = () => {
+          const findDialogClaimButton = (readyCardInfo) => {
+            const CLAIM_POINTS_RE =
+              window.CLAIM_MATCH_RE ||
+              /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы|pending.*claim|\bclaim\b|\bnhận\b/i;
+
             const dialogs = collectAllElements(document).filter((el) => {
               if (!(el instanceof HTMLElement)) return false;
               if (!isVisible(el)) return false;
-              return (el.getAttribute("role") || "").toLowerCase() === "dialog";
+              if (el.classList?.contains("bottom-0") && el.classList?.contains("sticky")) return false;
+              const role = (el.getAttribute("role") || "").toLowerCase();
+              return (
+                role === "dialog" ||
+                el.tagName.toLowerCase() === "dialog" ||
+                el.classList?.contains("shadow-shadowFlyout") ||
+                el.classList?.contains("bg-flyout") ||
+                el.getAttribute("aria-modal") === "true" ||
+                (el.getAttribute("data-rac") !== null && /flyout|dialog|react-aria/i.test(el.className || "")) ||
+                Boolean(el.querySelector?.("h2[slot='title'], [slot='title']"))
+              );
             });
 
-            const CLAIM_TEXT_RE =
-              /^claim points$|^nhận điểm$|^领取积分$|^réclamer des points$|^punkte einlösen$|^reclamar puntos$|^готово к получению$|^получить баллы$/i;
-            const CLAIM_MATCH_RE =
-              /claim points|nhận điểm|领取积分|réclamer des points|punkte einlösen|reclamar puntos|получить баллы/i;
+            if (!dialogs.length) return null;
 
-            for (const dialog of dialogs) {
-              if (!CLAIM_MATCH_RE.test(getNodeText(dialog))) continue;
-
-              // 1. Search for an element with text matching "Claim points" inside a button
-              const labelEl = Array.from(dialog.querySelectorAll("*")).find((el) => {
-                if (!(el instanceof HTMLElement)) return false;
-                if (!isVisible(el)) return false;
-                if (!CLAIM_TEXT_RE.test(getNodeText(el))) return false;
-                return Boolean(
-                  el.closest(
-                    "button, [role='button'], input[type='button'], input[type='submit']",
-                  ),
-                );
-              });
-
-              if (labelEl) {
-                const btn = labelEl.closest(
-                  "button, [role='button'], input[type='button'], input[type='submit']",
-                );
-                if (
-                  btn &&
-                  isVisible(btn) &&
-                  !btn.disabled &&
-                  btn.getAttribute("aria-disabled") !== "true"
-                ) {
-                  return btn;
-                }
-              }
-
-              // 2. Fallback: search for buttons whose text contains "claim points"
-              // (e.g. "103 Pending Claim points"), excluding dismiss/close controls
-              const button = Array.from(
-                dialog.querySelectorAll(
-                  "button, [role='button'], input[type='button'], input[type='submit']",
+            for (const scope of dialogs) {
+              const buttons = Array.from(
+                scope.querySelectorAll(
+                  "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
                 ),
-              ).find((el) => {
-                if (!(el instanceof HTMLElement)) return false;
-                if (!isVisible(el)) return false;
-                if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
-                const text = getNodeText(el);
-                if (/^(close|dismiss|how it works|đóng|bỏ qua)$/i.test(text)) return false;
-                const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
-                if (/close|dismiss/i.test(ariaLabel)) return false;
-                return CLAIM_MATCH_RE.test(text);
-              });
-              if (button) return button;
+              );
+              for (const btn of buttons) {
+                if (!(btn instanceof HTMLElement) || !isVisible(btn)) continue;
+                if (btn.disabled || btn.getAttribute("aria-disabled") === "true") continue;
+                if (readyCardInfo && (btn === readyCardInfo.cardButton || (readyCardInfo.cardContainer && readyCardInfo.cardContainer.contains(btn)))) {
+                  continue;
+                }
+                const ariaLabel = (btn.getAttribute("aria-label") || "").toLowerCase();
+                const slot = (btn.getAttribute("slot") || "").toLowerCase();
+                if (slot === "close" || /close|dismiss|how it works|đóng|bỏ qua/i.test(ariaLabel)) continue;
+                const text = getNodeText(btn);
+                if (/how it works|close|dismiss|đóng|bỏ qua/i.test(text)) continue;
+                if (window.READY_TO_CLAIM_LABEL_RE ? window.READY_TO_CLAIM_LABEL_RE.test(text) : /ready to claim|sẵn sàng nhận/i.test(text)) continue;
+                if (CLAIM_POINTS_RE.test(text)) return btn;
+              }
             }
 
             return null;
@@ -717,21 +1119,88 @@ async function autoClickRewards() {
 
           console.log("[Rewards-Debug] claimReadyPoints: Scanning for ready-to-claim cards...");
           const readyCard = findReadyToClaimCard();
-          if (!readyCard) {
+          if (!readyCard || readyCard.points <= 0) {
             console.log("[Rewards-Debug] claimReadyPoints: No ready-to-claim card found.");
             return { clicked: false, claimedPoints: 0, reason: "not_ready" };
           }
 
           console.log("[Rewards-Debug] claimReadyPoints: Found ready card for " + readyCard.points + " points. Clicking...");
           clickElement(readyCard.cardButton);
+          if (typeof window.dispatchRewardPress === "function") {
+            try { window.dispatchRewardPress(readyCard.cardButton); } catch { }
+          }
+          if (readyCard.cardContainer && readyCard.cardContainer !== readyCard.cardButton) {
+            clickElement(readyCard.cardContainer);
+            const claimTextEl = Array.from(readyCard.cardContainer.querySelectorAll("p, span, div")).find((el) => /claim|nhận/i.test(getNodeText(el)));
+            if (claimTextEl) {
+              clickElement(claimTextEl);
+              if (typeof window.dispatchRewardPress === "function") {
+                try { window.dispatchRewardPress(claimTextEl); } catch { }
+              }
+            }
+          }
 
           for (let attempt = 0; attempt < maxAttempts; attempt++) {
             await sleep(pollMs);
-            const claimPointsButton = findDialogClaimButton();
-            if (!claimPointsButton) continue;
+
+            if (attempt >= 2) {
+              const checkCard = findReadyToClaimCard();
+              if (!checkCard || checkCard.points === 0) {
+                console.log("[Rewards-Debug] claimReadyPoints: Ready card is gone or points 0, claim succeeded directly!");
+                return { clicked: true, claimedPoints: readyCard.points, reason: "claimed_directly" };
+              }
+            }
+
+            const claimPointsButton = findDialogClaimButton(readyCard);
+            if (!claimPointsButton) {
+              if ((attempt + 1) % 3 === 0) {
+                console.log("[Rewards-Debug] claimReadyPoints: Dialog not opened yet, re-clicking card button...");
+                const currentCard = findReadyToClaimCard();
+                const btnToClick = currentCard?.cardButton || readyCard.cardButton;
+                clickElement(btnToClick);
+                if (typeof window.dispatchRewardPress === "function") {
+                  try { window.dispatchRewardPress(btnToClick); } catch { }
+                }
+              }
+              continue;
+            }
 
             console.log("[Rewards-Debug] claimReadyPoints: Claim points dialog found. Clicking claim...");
+            const dialogScope =
+              claimPointsButton.closest("dialog, [role='dialog'], [class*='flyout' i], section") ||
+              null;
             clickElement(claimPointsButton);
+            if (typeof window.dispatchRewardPress === "function") {
+              try { window.dispatchRewardPress(claimPointsButton); } catch { }
+            }
+            const innerTarget = claimPointsButton.querySelector(
+              "[class*='brand' i], [class*='Button'], span[class*='text' i], span",
+            );
+            if (innerTarget && innerTarget !== claimPointsButton && isVisible(innerTarget)) {
+              clickElement(innerTarget);
+              if (typeof window.dispatchRewardPress === "function") {
+                try { window.dispatchRewardPress(innerTarget); } catch { }
+              }
+            }
+            await sleep(2500);
+
+            if (dialogScope) {
+              const closeSelectors =
+                "button[slot='close'], button[aria-label='Close' i], button[aria-label='Đóng' i], button[aria-label='Schließen' i], button[aria-label='Fermer' i], button[aria-label='Cerrar' i], button[aria-label='关闭' i], button[aria-label='Закрыть' i]";
+              const closeBtn =
+                Array.from(dialogScope.querySelectorAll(closeSelectors)).find((el) => el instanceof HTMLElement && isVisible(el)) ||
+                collectAllElements(dialogScope).find((el) => {
+                  if (!(el instanceof HTMLElement) || !isVisible(el)) return false;
+                  if (!el.matches?.("button, [role='button'], [data-react-aria-pressable='true']")) return false;
+                  const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+                  const slot = el.getAttribute("slot") || "";
+                  return slot === "close" || /^(close|dismiss|đóng|schließen|fermer|cerrar|关闭|закрыть)$/i.test(aria);
+                });
+              if (closeBtn) {
+                clickElement(closeBtn);
+              }
+            }
+
             return {
               clicked: true,
               claimedPoints: readyCard.points,
@@ -1010,24 +1479,48 @@ async function autoClickRewards() {
               (window.isCompletedText || ((v) => /\bcompleted\b|\bdone\b|ho\u00e0n th\u00e0nh|\u0111\u00e3 xong/i.test(normalizeText(v).toLowerCase())))(value);
 
             const isVisible = (el) => {
-              if (!el || typeof el.getBoundingClientRect !== "function") return false;
-              const rect = el.getBoundingClientRect();
+              if (!el) return false;
               const style = window.getComputedStyle(el);
-              return (
-                rect.width > 0 &&
-                rect.height > 0 &&
-                style.visibility !== "hidden" &&
-                style.display !== "none"
-              );
+              if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                return false;
+              }
+              if (typeof el.checkVisibility === "function") {
+                if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+                  return false;
+                }
+              }
+              if (typeof el.getBoundingClientRect === "function") {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) return true;
+                for (const child of el.children || []) {
+                  if (typeof child.getBoundingClientRect === "function") {
+                    const childRect = child.getBoundingClientRect();
+                    if (childRect.width > 0 && childRect.height > 0) return true;
+                  }
+                }
+              }
+              return false;
             };
 
             const expandSectionIfCollapsed = (section) => {
               if (!section) return;
-              const triggers = section.querySelectorAll(
-                "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls]",
-              );
+              if (typeof window.expandRewardSection === "function") {
+                try {
+                  window.expandRewardSection(section);
+                  return;
+                } catch { }
+              }
+              const triggers = section.querySelectorAll?.(
+                "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls], [data-rac][aria-expanded='false'][slot='trigger'], [data-react-aria-pressable='true'][aria-expanded='false'], [aria-expanded='false'][aria-controls], [role='button'][aria-expanded='false'][aria-controls]",
+              ) || [];
               for (const trigger of triggers) {
-                try { trigger.click(); } catch { }
+                try {
+                  if (typeof window.dispatchRewardPress === "function") {
+                    window.dispatchRewardPress(trigger);
+                  } else {
+                    trigger.click();
+                  }
+                } catch { }
               }
             };
 
@@ -1078,21 +1571,25 @@ async function autoClickRewards() {
                 .length;
             };
 
-            const countFallbackCards = () =>
-              Array.from(
+            const countFallbackCards = () => {
+              expandSectionIfCollapsed(document);
+              return Array.from(
                 document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
               )
                 .filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""))
                 .filter((anchor) => isPendingCard(anchor, document))
                 .length;
+            };
 
-            const countFallbackCardShells = () =>
-              Array.from(
+            const countFallbackCardShells = () => {
+              expandSectionIfCollapsed(document);
+              return Array.from(
                 document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault'], a[href][data-react-aria-pressable='true']"),
               )
                 .filter((anchor) => window.isDashboardRewardHref(anchor.href || anchor.getAttribute("href") || ""))
                 .filter((anchor) => isRewardCardShell(anchor, document))
                 .length;
+            };
 
             while (Date.now() - startedAt < maxWaitMs) {
               attempts++;
@@ -1101,26 +1598,41 @@ async function autoClickRewards() {
                 .filter((id) => id && id !== "global")
                 .map((id) => document.querySelector(`#${id}`))
                 .filter(Boolean);
-              const dailyset = document.querySelector("#dailyset");
+              const dailyset = document.querySelector("#dailyset") || document.querySelector("#ext-restored-dailyset");
               const sectionCards = sections.reduce((sum, section) => sum + countSectionCards(section), 0);
               const sectionCardShells = sections.reduce((sum, section) => sum + countSectionCardShells(section), 0);
               const fallbackCards =
                 (
-                  (ids.includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                  ((ids.includes("dailyset") || ids.includes("ext-restored-dailyset")) && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
                   (ids.includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href))
                 )
                   ? countFallbackCards()
                   : 0;
               const fallbackCardShells =
                 (
-                  (ids.includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                  ((ids.includes("dailyset") || ids.includes("ext-restored-dailyset")) && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
                   (ids.includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href))
                 )
                   ? countFallbackCardShells()
                   : 0;
               const count = Math.max(sectionCards, fallbackCards);
               const hydratedCards = Math.max(sectionCardShells, fallbackCardShells);
-              const hydrated = hydratedCards > 0 || allowPreviouslyHydratedEmpty === true;
+              const directRoundedAnchors = document.querySelectorAll(
+                "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
+              ).length;
+              const targetSectionDirectRoundedAnchors = sections.reduce(
+                (sum, s) =>
+                  sum +
+                  (s.querySelectorAll?.(
+                    "a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']",
+                  )?.length || 0),
+                0,
+              );
+              const hydrated =
+                hydratedCards > 0 ||
+                targetSectionDirectRoundedAnchors > 0 ||
+                (sections.length === 0 && directRoundedAnchors > 0) ||
+                allowPreviouslyHydratedEmpty === true;
               const hasTargetSection = sections.length > 0;
 
               const now = Date.now();
@@ -1230,23 +1742,56 @@ async function autoClickRewards() {
 
             const linkText = window.normalizeRewardText(node.innerText || node.textContent || "");
             if (!linkText) continue;
+            if (window.isCompletedQuestText?.(linkText)) continue;
 
             const key = window.buildQuestCardKey({ href, text: linkText });
 
-            // Dedup by actual href (stable) to avoid re-processing the same quest
+            // Dedup by stable key to avoid re-processing the same quest
             // when dynamic text like "2/7 tasks" changes to "4/7 tasks" after activities.
-            if (seen.has(href)) continue;
-            seen.add(href);
+            const cleanText = (str) =>
+              str
+                ? window.normalizeRewardText(str)
+                    .replace(/\b\d+\s*\/\s*\d+(?:\s+tasks?)?\b/gi, "")
+                    .replace(/\bexpires\s+in\s+[^.]+/gi, "")
+                    .replace(/\s+/g, " ")
+                    .trim()
+                : "";
+            const normalizedButtonText = cleanText(linkText);
+            const cardContainer =
+              node.closest(".rounded-cornerCardDefault, [role='article'], li") ||
+              node.closest("div[class*='card' i]") ||
+              node;
+            const rawHeading =
+              node.querySelector("h2, h3, h4, [class*='title'], [class*='Title']")?.textContent ||
+              cardContainer.querySelector("h2, h3, h4, [class*='title'], [class*='Title']")?.textContent;
+            const cardId =
+              node.id ||
+              cleanText(node.getAttribute("aria-label")) ||
+              cleanText(rawHeading) ||
+              normalizedButtonText;
+            const domIndex = cardContainer.parentElement
+              ? Array.prototype.indexOf.call(cardContainer.parentElement.children, cardContainer)
+              : -1;
+            const isDistinctQuestHref = href && !/^(?:#|javascript:)/i.test(href);
+            const fallbackIndex = domIndex >= 0 ? domIndex : 0;
+            let stableKey;
+            if (isDistinctQuestHref) {
+              stableKey = cardId ? `${href}|${cardId}` : `${href}|${fallbackIndex}`;
+            } else {
+              stableKey = cardId ? `btn|${cardId}` : `btn|quest|${fallbackIndex}`;
+            }
+
+            if (seen.has(stableKey)) continue;
+            seen.add(stableKey);
 
             items.push({
               href: key,   // kept for clickQuestCard matching
               key: key,
-              actualHref: href, // stable key for attemptedQuestKeys dedup
+              actualHref: stableKey, // stable key for attemptedQuestKeys dedup
             });
           }
 
           console.log("[Rewards-Debug] getQuestCards: Returning " + items.length + " valid actionable quest cards.");
-          console.log("[Rewards-Debug] getQuestActivities: Returning " + items.length + " valid actionable activities.");
           return items;
         },
       });
@@ -1362,46 +1907,72 @@ async function autoClickRewards() {
 
           const candidates = Array.from(
             activitiesRoot.querySelectorAll(
-              "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']"
+              "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true']"
             )
           );
           
           const uniqueCards = new Set();
           const activityCards = [];
           for (const cand of candidates) {
-            const card = cand.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
+            const card = cand.closest(".flex-row, [role='row'], [role='listitem'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
             if (!uniqueCards.has(card) && isVisible(card) && !card.closest("#quests")) {
               uniqueCards.add(card);
-              activityCards.push(card);
+              activityCards.push({ card, cand });
             }
           }
           console.log("[Rewards-Debug] getQuestActivities: Found " + activityCards.length + " activity cards inside root. Filtering actionable ones...");
 
           const seen = new Set();
           const items = [];
-          for (const card of activityCards) {
+          for (const { card, cand } of activityCards) {
             const cardText = window.normalizeRewardText(card.innerText || card.textContent || "");
-            const actionTarget =
-              card.querySelector("button:not([aria-disabled='true']), [role='button']:not([aria-disabled='true']), a[href], [role='link'], [data-react-aria-pressable='true']") ||
-              card;
-            const href = actionTarget.href || actionTarget.getAttribute("href") || "";
+            const actionTarget = cand;
+            const href = actionTarget.href || actionTarget.getAttribute("href") || card.getAttribute("href") || card.querySelector("[href]")?.getAttribute("href") || "";
             const innerLabel = window.normalizeRewardText(actionTarget.innerText || actionTarget.textContent || cardText);
-            const ariaLabel = window.normalizeRewardText(actionTarget.getAttribute("aria-label") || "");
+            const ariaLabel = window.normalizeRewardText(actionTarget.getAttribute("aria-label") || card.getAttribute("aria-label") || "");
             const label = ariaLabel || innerLabel || cardText;
-            const isCompleted =
+            const hasSuccessBadge =
               !!card.closest("[class*='completed'], [class*='Success']") ||
-              !!card.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
-              window.isCompletedText(cardText);
+              (typeof window.isCardCompleted === "function"
+                ? window.isCardCompleted(card)
+                : !!card.querySelector(
+                    "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+                  ));
+            let isCompleted = hasSuccessBadge;
+            if (!isCompleted && typeof window.isCardCompleted !== "function") {
+              const statusEls = card.querySelectorAll(
+                "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
+              );
+              for (const el of statusEls) {
+                const t = window.normalizeRewardText(el.textContent || "");
+                if (typeof window.isCompletedQuestText === "function") {
+                  if (window.isCompletedQuestText(t)) {
+                    isCompleted = true;
+                    break;
+                  }
+                } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                  isCompleted = true;
+                  break;
+                }
+              }
+            }
+            const isExclusiveApp =
+              /\b(?:rewards\s+app|bing\s+app|exclusive)\b/i.test(`${label} ${cardText}`) ||
+              /[?&](?:PUBL=RewardsDO|form=ML2Y2H|rnoreward=1)\b/i.test(href);
             const isActionable = window.isActionableQuestActivity({
+              href,
               innerLabel: label,
               ariaLabel: "",
               isVisible: true,
+              isPressable: actionTarget.matches?.("button, [role='button'], [role='link'], a[href], [data-react-aria-pressable='true']"),
               isDisabled:
                 actionTarget.getAttribute("aria-disabled") === "true" ||
                 !!actionTarget.closest("[aria-disabled='true'], [data-disabled='true']"),
               isInNav: !!card.closest("nav, header, [role='banner']"),
               isQuestCard: false,
+              hasSuccessBadge,
               isCompleted,
+              isExclusiveAppCard: isExclusiveApp,
             });
             if (!isActionable) continue;
             const key = window.buildQuestActivityKey({ href, innerLabel: `${cardText} ${label}`, ariaLabel: "" });
@@ -1462,45 +2033,72 @@ async function autoClickRewards() {
             if (activitiesRoot) {
               const candidates = Array.from(
                 activitiesRoot.querySelectorAll(
-                  "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']"
+                  "a[href], button, [role='button'], [role='link'], [data-react-aria-pressable='true']"
                 )
               );
               
               const uniqueCards = new Set();
               const cards = [];
               for (const cand of candidates) {
-                const card = cand.closest(".rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
+                const card = cand.closest(".flex-row, [role='row'], [role='listitem'], .rounded-cornerCardDefault, [class*='rounded-cornerCardDefault']") || cand;
                 if (!uniqueCards.has(card) && isVisible(card) && !card.closest("#quests")) {
                   uniqueCards.add(card);
-                  cards.push(card);
+                  cards.push({ card, cand });
                 }
               }
 
-              for (const candidate of cards) {
+              for (const { card: candidate, cand: target } of cards) {
                 const cardText = window.normalizeRewardText(candidate.innerText || candidate.textContent || "");
-                const target =
-                  candidate.querySelector("button:not([aria-disabled='true']), [role='button']:not([aria-disabled='true']), a[href], [role='link'], [data-react-aria-pressable='true']") ||
-                  candidate;
-                const href = target.href || target.getAttribute("href") || "";
+                const href = target.href || target.getAttribute("href") || candidate.getAttribute("href") || candidate.querySelector("[href]")?.getAttribute("href") || "";
                 const innerLabel = window.normalizeRewardText(target.innerText || target.textContent || cardText);
+                const ariaLabel = window.normalizeRewardText(target.getAttribute("aria-label") || candidate.getAttribute("aria-label") || "");
                 const candKey = window.buildQuestActivityKey({
                   href,
-                  innerLabel: `${cardText} ${innerLabel || cardText}`,
+                  innerLabel: `${cardText} ${ariaLabel || innerLabel || cardText}`,
                   ariaLabel: "",
                 });
+                const hasSuccessBadge =
+                  !!candidate.closest("[class*='completed'], [class*='Success']") ||
+                  (typeof window.isCardCompleted === "function"
+                    ? window.isCardCompleted(candidate)
+                    : !!candidate.querySelector(
+                        "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+                      ));
+                let isCompleted = hasSuccessBadge;
+                if (!isCompleted && typeof window.isCardCompleted !== "function") {
+                  const statusEls = candidate.querySelectorAll(
+                    "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
+                  );
+                  for (const el of statusEls) {
+                    const t = window.normalizeRewardText(el.textContent || "");
+                    if (typeof window.isCompletedQuestText === "function") {
+                      if (window.isCompletedQuestText(t)) {
+                        isCompleted = true;
+                        break;
+                      }
+                    } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                      isCompleted = true;
+                      break;
+                    }
+                  }
+                }
+                const isExclusiveApp =
+                  /\b(?:rewards\s+app|bing\s+app|exclusive)\b/i.test(`${ariaLabel} ${innerLabel} ${cardText}`) ||
+                  /[?&](?:PUBL=RewardsDO|form=ML2Y2H|rnoreward=1)\b/i.test(href);
                 const isMatchable = window.isActionableQuestActivity({
+                  href,
                   innerLabel: innerLabel || cardText,
-                  ariaLabel: "",
+                  ariaLabel,
                   isVisible: true,
+                  isPressable: target.matches?.("button, [role='button'], [role='link'], a[href], [data-react-aria-pressable='true']"),
                   isDisabled:
                     target.getAttribute("aria-disabled") === "true" ||
                     !!target.closest("[aria-disabled='true'], [data-disabled='true']"),
                   isInNav: !!candidate.closest("nav, header, [role='banner']"),
                   isQuestCard: false,
-                  isCompleted:
-                    !!candidate.closest("[class*='completed'], [class*='Success']") ||
-                    !!candidate.querySelector("svg[class*='Success'], mee-icon[class*='Success']") ||
-                    window.isCompletedText(cardText),
+                  hasSuccessBadge,
+                  isCompleted,
+                  isExclusiveAppCard: isExclusiveApp,
                 });
                 if (!isMatchable) continue;
 
@@ -1648,12 +2246,19 @@ async function autoClickRewards() {
           }
 
           return {
-            clicked: success,
+            clicked:
+              success ||
+              Boolean(
+                actionEl?.getAttribute?.("href") ||
+                actionEl?.href ||
+                el?.getAttribute?.("href") ||
+                el?.href
+              ),
             href:
               actionEl?.href ||
               actionEl?.getAttribute?.("href") ||
-              el.href ||
-              el.getAttribute("href") ||
+              el?.href ||
+              el?.getAttribute?.("href") ||
               "",
           };
         },
@@ -1682,57 +2287,76 @@ async function autoClickRewards() {
       func: (sectionIds, carriedStableEmptySince, maxWaitMs, allowPreviouslyHydratedEmpty) => {
         return new Promise((resolve) => {
           const isVisible = (el) => {
-            if (!el || typeof el.getBoundingClientRect !== "function") return false;
-            const rect = el.getBoundingClientRect();
+            if (!el) return false;
             const style = window.getComputedStyle(el);
-            return (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              style.visibility !== "hidden" &&
-              style.display !== "none"
-            );
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+              return false;
+            }
+            if (typeof el.checkVisibility === "function") {
+              if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+                return false;
+              }
+            }
+            if (typeof el.getBoundingClientRect === "function") {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) return true;
+              for (const child of el.children || []) {
+                if (typeof child.getBoundingClientRect === "function") {
+                  const childRect = child.getBoundingClientRect();
+                  if (childRect.width > 0 && childRect.height > 0) return true;
+                }
+              }
+            }
+            return false;
           };
 
             function expandSectionIfCollapsed(section) {
               if (!section) return;
-              // React Aria Disclosure pattern: button[slot='trigger']
-              const trigger = section.querySelector(
-                "button[slot='trigger'][aria-expanded='false']",
-              );
-              if (trigger) {
+              if (typeof window.expandRewardSection === "function") {
                 try {
-                  trigger.click();
+                  window.expandRewardSection(section);
+                  return;
                 } catch { }
               }
-              // Also handle aria-expanded on buttons with aria-controls
-              const collapsedBtns = section.querySelectorAll(
-                "button[aria-expanded='false'][aria-controls]",
-              );
-              for (const btn of collapsedBtns) {
-                try { btn.click(); } catch { }
+              const triggers = section.querySelectorAll?.(
+                "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls], [data-rac][aria-expanded='false'][slot='trigger'], [data-react-aria-pressable='true'][aria-expanded='false'], [aria-expanded='false'][aria-controls], [role='button'][aria-expanded='false'][aria-controls]",
+              ) || [];
+              for (const trigger of triggers) {
+                try {
+                  if (typeof window.dispatchRewardPress === "function") {
+                    window.dispatchRewardPress(trigger);
+                  } else {
+                    trigger.click();
+                  }
+                } catch { }
               }
             }
 
             function isCardCompleted(cardEl) {
+              if (typeof window.isCardCompleted === "function") {
+                return window.isCardCompleted(cardEl);
+              }
               if (!cardEl) return false;
-              const successBadge = cardEl.querySelector(
-                "[class*='statusSuccess']"
-              );
-              if (successBadge && successBadge.querySelector("svg")) {
+              if (
+                cardEl.querySelector(
+                  "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+                )
+              ) {
                 return true;
               }
-
               const statusEls = cardEl.querySelectorAll(
-                "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
+                "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
               );
               for (const el of statusEls) {
-                const t = window.normalizeRewardText(el.textContent || "").toLowerCase();
-                if (window.isCompletedText(t)) return true;
+                const t = typeof window.normalizeRewardText === "function"
+                  ? window.normalizeRewardText(el.textContent || "")
+                  : (el.textContent || "").replace(/\s+/g, " ").trim();
+                if (typeof window.isCompletedQuestText === "function") {
+                  if (window.isCompletedQuestText(t)) return true;
+                } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                  return true;
+                }
               }
-
-              const fullText = window.normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
-              if (window.isCompletedText(fullText)) return true;
-
               return false;
             }
 
@@ -1909,11 +2533,15 @@ async function autoClickRewards() {
               console.log(
                 `[Rewards] Section #${sectionId}: found ${unique.length} actionable card(s)`,
               );
-              sectionDebug.hydrated = sectionDebug.cardShells > 0;
+              sectionDebug.hydrated =
+                sectionDebug.cardShells > 0 ||
+                sectionDebug.completed > 0 ||
+                sectionDebug.directRoundedAnchors > 0;
               return unique;
             }
 
             function collectPageRewardFallbackCards(debugSections, sectionId) {
+              expandSectionIfCollapsed(document);
               const sectionDebug = {
                 sectionId,
                 exists: true,
@@ -1998,7 +2626,10 @@ async function autoClickRewards() {
                 sectionDebug.accepted++;
               }
 
-              sectionDebug.hydrated = sectionDebug.cardShells > 0;
+              sectionDebug.hydrated =
+                sectionDebug.cardShells > 0 ||
+                sectionDebug.completed > 0 ||
+                sectionDebug.directRoundedAnchors > 0;
               return unique;
             }
 
@@ -2017,11 +2648,15 @@ async function autoClickRewards() {
                 card.querySelector("img[alt]");
               const rawTitle =
                 titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
-              return window.buildRewardCardKey({
-                href,
-                title: rawTitle,
-                text: card?.innerText || card?.textContent || "",
-              });
+              if (typeof window.buildRewardCardKey === "function") {
+                return window.buildRewardCardKey({
+                  href,
+                  title: rawTitle,
+                  text: card?.innerText || card?.textContent || "",
+                });
+              }
+              const normalized = (rawTitle || card?.innerText || card?.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+              return `${href || "btn"}|${normalized}`;
             }
 
             function collectCards(cards) {
@@ -2038,7 +2673,17 @@ async function autoClickRewards() {
                 if (!key) continue;
                 if (seen.has(key)) continue;
                 seen.add(key);
-                items.push({ key, href });
+                const isRestored = Boolean(
+                  (typeof card?.closest === "function" && card.closest("#ext-restored-dailyset")) ||
+                  card?.id === "ext-restored-dailyset" ||
+                  (typeof card?.getAttribute === "function" && card.getAttribute("data-reward-card-name")) ||
+                  (typeof card?.querySelector === "function" && card.querySelector("[data-reward-card-name]"))
+                );
+                const offerId = (typeof card?.getAttribute === "function" && card.getAttribute("data-offer-id")) || "";
+                const authKey = (typeof card?.getAttribute === "function" && card.getAttribute("data-auth-key")) || "";
+                const activityType = (typeof card?.getAttribute === "function" && card.getAttribute("data-activity-type")) || "";
+                const userId = (typeof card?.getAttribute === "function" && card.getAttribute("data-user-id")) || "";
+                items.push({ key, href, isRestored, offerId, authKey, activityType, userId });
               }
 
               return items;
@@ -2064,7 +2709,7 @@ async function autoClickRewards() {
                   .flat();
                 if (sectionCards.length === 0) {
                   const isDashboardFallback =
-                    (sectionIds || []).includes("dailyset") &&
+                    ((sectionIds || []).includes("dailyset") || (sectionIds || []).includes("ext-restored-dailyset")) &&
                     /rewards\.bing\.com\/dashboard/i.test(location.href);
                   const isEarnFallback =
                     (sectionIds || []).includes("moreactivities") &&
@@ -2170,9 +2815,22 @@ async function autoClickRewards() {
       stableEmpty: scanResult?.reason === "stable_empty",
       previouslyHydrated,
     });
+    const compactSections = debug.map((s) => ({
+      sectionId: s.sectionId,
+      exists: s.exists,
+      hydrated: s.hydrated,
+      cardRoots: s.cardRoots,
+      accepted: s.accepted,
+      completed: s.completed,
+      directRoundedAnchors: s.directRoundedAnchors,
+      sectionChrome: s.sectionChrome,
+      cardShells: s.cardShells,
+      rejectionReasons: [...new Set((s.rejected || []).flatMap((r) => (typeof r === "object" && r ? r.reasons || [] : [r])))],
+      filteredOutCount: (s.filteredOut || []).length,
+    }));
     await appendDebugLog("info", "rewards", "Reward card scan diagnostics", {
       tabId,
-      sections: debug,
+      sections: compactSections,
       attempts: scanResult?.attempts,
       reason: scanResult?.reason,
       stableEmptyMs: scanResult?.stableEmptyMs,
@@ -2200,15 +2858,27 @@ async function autoClickRewards() {
         func: async (keyToClick, sectionIds) => {
           console.log("[Rewards-Debug] clickRewardCard: Attempting to click reward card with key:", keyToClick);
           const isVisible = (el) => {
-            if (!el || typeof el.getBoundingClientRect !== "function") return false;
-            const rect = el.getBoundingClientRect();
+            if (!el) return false;
             const style = window.getComputedStyle(el);
-            return (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              style.visibility !== "hidden" &&
-              style.display !== "none"
-            );
+            if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+              return false;
+            }
+            if (typeof el.checkVisibility === "function") {
+              if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+                return false;
+              }
+            }
+            if (typeof el.getBoundingClientRect === "function") {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) return true;
+              for (const child of el.children || []) {
+                if (typeof child.getBoundingClientRect === "function") {
+                  const childRect = child.getBoundingClientRect();
+                  if (childRect.width > 0 && childRect.height > 0) return true;
+                }
+              }
+            }
+            return false;
           };
 
           const isDisabled = (el) =>
@@ -2220,42 +2890,51 @@ async function autoClickRewards() {
 
           function expandSectionIfCollapsed(section) {
             if (!section) return;
-            const trigger = section.querySelector(
-              "button[slot='trigger'][aria-expanded='false']",
-            );
-            if (trigger) {
+            if (typeof window.expandRewardSection === "function") {
               try {
-                trigger.click();
+                window.expandRewardSection(section);
+                return;
               } catch { }
             }
-            // Also handle aria-expanded on buttons with aria-controls
-            const collapsedBtns = section.querySelectorAll(
-              "button[aria-expanded='false'][aria-controls]",
-            );
-            for (const btn of collapsedBtns) {
-              try { btn.click(); } catch { }
+            const triggers = section.querySelectorAll?.(
+              "button[slot='trigger'][aria-expanded='false'], button[aria-expanded='false'][aria-controls], [data-rac][aria-expanded='false'][slot='trigger'], [data-react-aria-pressable='true'][aria-expanded='false'], [aria-expanded='false'][aria-controls], [role='button'][aria-expanded='false'][aria-controls]",
+            ) || [];
+            for (const trigger of triggers) {
+              try {
+                if (typeof window.dispatchRewardPress === "function") {
+                  window.dispatchRewardPress(trigger);
+                } else {
+                  trigger.click();
+                }
+              } catch { }
             }
           }
 
           function isCardCompleted(cardEl) {
+            if (typeof window.isCardCompleted === "function") {
+              return window.isCardCompleted(cardEl);
+            }
             if (!cardEl) return false;
-            const successBadge = cardEl.querySelector(
-              "[class*='statusSuccess']"
-            );
-            if (successBadge && successBadge.querySelector("svg")) {
+            if (
+              cardEl.querySelector(
+                "svg[class*='Success'], mee-icon[class*='Success'], svg[class*='statusSuccess'], mee-icon[class*='statusSuccess'], mee-icon[class*='CheckMark'], svg[class*='CheckMark'], mee-icon[class*='checkMark'], svg[class*='checkMark']",
+              )
+            ) {
               return true;
             }
-
             const statusEls = cardEl.querySelectorAll(
-              "[class*='metadata'], [class*='fgCtrlNeutralSecondary']"
+              "[class*='metadata'], [class*='fgCtrlNeutralSecondary']",
             );
             for (const el of statusEls) {
-              const t = window.normalizeRewardText(el.textContent || "").toLowerCase();
-              if (window.isCompletedText(t)) return true;
+              const t = typeof window.normalizeRewardText === "function"
+                ? window.normalizeRewardText(el.textContent || "")
+                : (el.textContent || "").replace(/\s+/g, " ").trim();
+              if (typeof window.isCompletedQuestText === "function") {
+                if (window.isCompletedQuestText(t)) return true;
+              } else if (typeof window.isCompletedText === "function" && window.isCompletedText(t)) {
+                return true;
+              }
             }
-
-            const fullText = window.normalizeRewardText(cardEl.innerText || cardEl.textContent || "").toLowerCase();
-            if (window.isCompletedText(fullText)) return true;
             return false;
           }
 
@@ -2326,6 +3005,7 @@ async function autoClickRewards() {
           }
 
           function collectPageRewardFallbackCards() {
+            expandSectionIfCollapsed(document);
             const anchors = [...new Set([
               ...document.querySelectorAll("a[href].rounded-cornerCardDefault, a[href][class*='rounded-cornerCardDefault']"),
               ...document.querySelectorAll("a[href][data-react-aria-pressable='true']"),
@@ -2377,11 +3057,15 @@ async function autoClickRewards() {
               card.querySelector("img[alt]");
             const rawTitle =
               titleEl?.textContent || titleEl?.getAttribute?.("alt") || "";
-            return window.buildRewardCardKey({
-              href,
-              title: rawTitle,
-              text: card?.innerText || card?.textContent || "",
-            });
+            if (typeof window.buildRewardCardKey === "function") {
+              return window.buildRewardCardKey({
+                href,
+                title: rawTitle,
+                text: card?.innerText || card?.textContent || "",
+              });
+            }
+            const normalized = (rawTitle || card?.innerText || card?.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+            return `${href || "btn"}|${normalized}`;
           }
 
           function getCardSignature(card) {
@@ -2392,7 +3076,9 @@ async function autoClickRewards() {
               card.querySelector("[aria-expanded]")?.getAttribute("aria-expanded") ||
               "";
             const disabled = isDisabled(card) ? "disabled" : "enabled";
-            const status = window.normalizeRewardText(card?.innerText || card?.textContent || "").toLowerCase();
+            const status = (typeof window.normalizeRewardText === "function"
+              ? window.normalizeRewardText(card?.innerText || card?.textContent || "")
+              : (card?.innerText || card?.textContent || "").replace(/\s+/g, " ").trim()).toLowerCase();
             return `${href}|${expanded}|${disabled}|${status}`;
           }
 
@@ -2479,7 +3165,7 @@ async function autoClickRewards() {
           }
 
           async function tryActivateTarget(card, target) {
-            if (!target || !isVisible(target) || isDisabled(target)) return false;
+            if (!target || (typeof target.isConnected === "boolean" && !target.isConnected) || !isVisible(target) || isDisabled(target)) return false;
 
             const beforeSignature = getCardSignature(card);
             const beforeUrl = location.href;
@@ -2594,7 +3280,7 @@ async function autoClickRewards() {
               .flat();
             if (cardsList.length === 0) {
               const usePageFallback =
-                ((sectionIds || []).includes("dailyset") && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
+                (((sectionIds || []).includes("dailyset") || (sectionIds || []).includes("ext-restored-dailyset")) && /rewards\.bing\.com\/dashboard/i.test(location.href)) ||
                 ((sectionIds || []).includes("moreactivities") && /rewards\.bing\.com\/earn/i.test(location.href));
               if (usePageFallback) {
                 cardsList.push(...collectPageRewardFallbackCards());
@@ -2603,9 +3289,18 @@ async function autoClickRewards() {
             card = cardsList.find((a) => {
               const candKey = buildCardKey(a);
               const candHref = a.getAttribute("href") || a.querySelector("a[href]")?.getAttribute("href") || "";
+              const fullText = typeof window.normalizeRewardText === "function"
+                ? window.normalizeRewardText(a.innerText || a.textContent || "")
+                : (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim();
+              const fullTextKey = typeof window.buildRewardCardKey === "function"
+                ? window.buildRewardCardKey({ href: candHref, text: fullText })
+                : `${candHref || "btn"}|${fullText.toLowerCase()}`;
               const targetHrefPart = keyToClick.split("|")[0];
-              return candKey === keyToClick || 
-                (candHref && targetHrefPart && candHref === targetHrefPart && candHref !== "#" && candHref !== "/earn");
+              return (
+                candKey === keyToClick ||
+                fullTextKey === keyToClick ||
+                (candHref && targetHrefPart && candHref === targetHrefPart && candHref !== "#" && candHref !== "/earn")
+              );
             });
             if (card) break;
             await sleep(800);
@@ -2847,14 +3542,17 @@ async function autoClickRewards() {
             }
 
             // Wait for quiz to fully initialize before starting
-            await sleep(3000);
+            await sleep(2000);
 
             let clicks = 0;
             let lastClickedText = "";
             let sameClickCount = 0;
             let lastCandidateSnapshot = [];
+            let emptyCandidateRounds = 0;
 
-            for (let attempt = 0; attempt < 25; attempt++) {
+            const clickedElements = new Set();
+            for (let attempt = 0; attempt < 12; attempt++) {
+              if (clicks >= 8) break;
               const completionEvidence = getQuizCompletionEvidence();
               if (completionEvidence) {
                 return {
@@ -2874,27 +3572,24 @@ async function autoClickRewards() {
               }));
 
               if (!candidates.length) {
-                await sleep(1500);
+                emptyCandidateRounds++;
+                if (emptyCandidateRounds >= 3) {
+                  break;
+                }
+                await sleep(1200);
                 continue;
               }
+              emptyCandidateRounds = 0;
 
-              // Avoid clicking the same element repeatedly (stale-click detection)
-              let target = candidates[0];
-              if (target.text === lastClickedText) {
-                sameClickCount++;
-                if (sameClickCount >= 3) {
-                  // Try a different candidate if available
-                  target = candidates.length > 1 ? candidates[1] : candidates[0];
-                  sameClickCount = 0;
-                }
-              } else {
-                sameClickCount = 0;
-              }
+              // Prefer unclicked candidates to make steady progress through quiz questions
+              const unclicked = candidates.filter((c) => !clickedElements.has(c.el));
+              let target = unclicked.length > 0 ? unclicked[0] : candidates[0];
+              clickedElements.add(target.el);
+
               lastClickedText = target.text;
-
               clickElement(target.el);
               clicks++;
-              await sleep(2500);
+              await sleep(1500);
             }
 
             const completionEvidence = getQuizCompletionEvidence();
@@ -3106,6 +3801,200 @@ async function autoClickRewards() {
       return result;
     };
 
+    let clickCount = 0;
+    let scanCount = 0;
+    let hydrationRetryCount = 0;
+    let consecutiveHydrationRetries = 0;
+    let lastHydrationStatus = "partial";
+    let lastScanSummary = null;
+
+    const makeIncompleteOutcome = (reason) => ({
+      status: "incomplete",
+      reason,
+      elapsedMs: Date.now() - startedAt,
+      remainingMs: remainingMs(),
+      clickCount,
+      scanCount,
+      hydrationRetryCount,
+      hydrationStatus: lastHydrationStatus,
+      scan: lastScanSummary,
+    });
+
+    async function processEdgeFlyoutDailySet() {
+      await appendDebugLog("info", "rewards", "Starting Edge flyout Daily Set fallback", { url });
+      let dailySetData = await fetchAndRestoreDailySet(null, { forceFresh: true });
+      if (!dailySetData || !Array.isArray(dailySetData.cards) || dailySetData.cards.length === 0) {
+        console.warn("[Rewards] Edge flyout Daily Set has no cards");
+        await appendDebugLog("warn", "rewards", "Edge flyout Daily Set has no cards");
+        return makeIncompleteOutcome("no_flyout_cards");
+      }
+
+      const incompleteCards = dailySetData.cards.filter((c) => !c.complete);
+      console.log(`[Rewards] Edge flyout Daily Set: ${dailySetData.cards.length} cards, ${incompleteCards.length} incomplete`);
+      await appendDebugLog("info", "rewards", "Edge flyout Daily Set status", {
+        totalCards: dailySetData.cards.length,
+        incompleteCards: incompleteCards.length,
+        streakDays: dailySetData.streakDays,
+      });
+
+      if (incompleteCards.length === 0) {
+        return {
+          status: "completed",
+          reason: "all_cards_completed",
+          elapsedMs: Date.now() - startedAt,
+          remainingMs: remainingMs(),
+          clickCount: 0,
+          scanCount: 1,
+          hydrationRetryCount: 0,
+          hydrationStatus: "hydrated",
+        };
+      }
+
+      for (const card of incompleteCards) {
+        if (timedOut()) break;
+        let targetUrl = card.destinationUrl;
+        if (!targetUrl) continue;
+        if (targetUrl.startsWith("/")) {
+          targetUrl = "https://www.bing.com" + targetUrl;
+        }
+
+        console.log(`[Rewards] Edge opening daily card: ${card.title || card.name} -> ${targetUrl}`);
+        await appendDebugLog("info", "rewards", "Opening Edge daily card", {
+          title: card.title || card.name,
+          targetUrl,
+          offerId: card.offerId,
+        });
+
+        let childTab = null;
+        try {
+          await enableRewardMobileEmulation();
+          childTab = await chrome.tabs.create({
+            url: targetUrl,
+            active: true,
+            windowId,
+          });
+          await waitForTabComplete(
+            childTab.id,
+            Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
+          );
+          await sleepWithinDeadline(2000);
+
+          const reportPayload = {
+            activityType: card.activityType || "bingredirect",
+            offerId: card.offerId || card.name || "",
+            authKey: card.hash || "",
+            userId: dailySetData.userId || "",
+          };
+
+          if (reportPayload.offerId && reportPayload.authKey) {
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: childTab.id },
+                world: "MAIN",
+                args: [REWARD_MOBILE_USER_AGENT, reportPayload],
+                func: async (ua, payload) => {
+                  try {
+                    Object.defineProperty(navigator, "userAgent", { get: () => ua, configurable: true });
+                    if (navigator.userAgentData) {
+                      Object.defineProperty(navigator.userAgentData, "mobile", { get: () => true, configurable: true });
+                      Object.defineProperty(navigator.userAgentData, "platform", { get: () => "Android", configurable: true });
+                    }
+                  } catch {}
+
+                  if (payload && payload.offerId && payload.authKey) {
+                    try {
+                      await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+                        method: "POST",
+                        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+                        credentials: "include",
+                        body: JSON.stringify({
+                          ActivityType: payload.activityType || "bingredirect",
+                          ActivitySubType: "",
+                          OfferId: payload.offerId,
+                          Channel: "BingFlyout",
+                          PartnerId: "BingRewards",
+                          UserId: payload.userId || "",
+                          AuthKey: payload.authKey,
+                          ActivityCount: 1,
+                        }),
+                      });
+                    } catch {}
+                  }
+                },
+              });
+            } catch (scriptErr) {
+              console.warn("[Rewards] Edge card script error:", scriptErr);
+            }
+          }
+
+          const quizResult = await awaitWithinDeadline(
+            handleRewardChildTab(childTab.id),
+            { handled: false, completed: false, reason: "deadline" },
+          );
+          if (quizResult?.handled) {
+            await appendDebugLog("info", "rewards", "Handled Edge daily card quiz", {
+              title: card.title,
+              completed: quizResult.completed,
+              clicks: quizResult.clicks,
+            });
+            await sleepWithinDeadline(2000);
+          } else if (!timedOut()) {
+            await awaitWithinDeadline(humanScrollOnTab(childTab.id), undefined);
+            if (!timedOut()) {
+              await waitForRewardSearchCredit(childTab.id, Math.min(8000, remainingMs()));
+            }
+          }
+
+          clickCount++;
+        } catch (err) {
+          console.warn("[Rewards] Edge daily card processing error:", err);
+        } finally {
+          await disableRewardMobileEmulation();
+          if (childTab?.id) {
+            try {
+              await chrome.tabs.remove(childTab.id);
+            } catch {}
+          }
+        }
+
+        await sleepWithinDeadline(2000);
+      }
+
+      try {
+        dailySetData = await fetchAndRestoreDailySet(null, { forceFresh: true });
+      } catch {}
+
+      // Auto-perform Visual Search on Edge if pending or needs activation
+      try {
+        const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" });
+        if (flyoutRes.ok) {
+          const flyoutHtml = await flyoutRes.text();
+          const yourActivity = extractYourActivityFromFlyoutHtml(flyoutHtml);
+          const vs = yourActivity?.activities?.find((a) => a.id === "visualsearch");
+          if (vs && !vs.completed) {
+            await appendDebugLog("info", "rewards", "Auto-executing Visual Search on Edge", { isEnabled: vs.isEnabled });
+            await performVisualSearch(windowId);
+          }
+        }
+      } catch (vsErr) {
+        console.warn("[Rewards] Visual Search execution error:", vsErr);
+      }
+
+      const remainingIncomplete = dailySetData?.cards?.filter((c) => !c.complete)?.length ?? 0;
+      const isCompleted = remainingIncomplete === 0;
+
+      return {
+        status: isCompleted ? "completed" : "incomplete",
+        reason: isCompleted ? "edge_flyout_daily_set_completed" : "cards_still_pending",
+        clickCount,
+        scanCount: 1,
+        elapsedMs: Date.now() - startedAt,
+        remainingMs: remainingMs(),
+        hydrationRetryCount: 0,
+        hydrationStatus: "hydrated",
+      };
+    }
+
     try {
       await ensureTabLoaded(tab.id, url);
       await ensureTabFocused(tab.id);
@@ -3121,11 +4010,7 @@ async function autoClickRewards() {
           actualUrl: currentTab.url,
           reason: "unexpected_redirect",
         });
-        return {
-          status: "incomplete",
-          reason: "unexpected_redirect",
-          elapsedMs: Date.now() - startedAt,
-        };
+        return makeIncompleteOutcome("unexpected_redirect");
       }
 
       // Inject helper functions into the page MAIN world so injected scripts can use them
@@ -3145,19 +4030,21 @@ async function autoClickRewards() {
           browser: getBrowserName(),
           reason,
         });
-        return {
-          status: "incomplete",
-          reason,
-          elapsedMs: Date.now() - startedAt,
-        };
+
+        if (isBlocked && /rewards\.bing\.com\/dashboard/i.test(url)) {
+          console.log("[Rewards] Edge blocked dashboard scripting. Processing Daily Set via Edge flyout fallback...");
+          return await processEdgeFlyoutDailySet();
+        }
+
+        return makeIncompleteOutcome(reason);
       }
 
-      if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        await appendDebugLog("info", "rewards", "Scanning for ready-to-claim card on dashboard", { url });
+      if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+        await appendDebugLog("info", "rewards", "Scanning for ready-to-claim card", { url });
         const claimResult = await claimReadyPoints(tab.id);
         if (claimResult.clicked) {
           console.log(
-            `[Rewards] Claimed ${claimResult.claimedPoints} ready point(s) from dashboard`,
+            `[Rewards] Claimed ${claimResult.claimedPoints} ready point(s) from ${url}`,
           );
           await appendDebugLog("success", "rewards", `Claimed ${claimResult.claimedPoints} ready point(s)`, {
             url,
@@ -3166,6 +4053,8 @@ async function autoClickRewards() {
           await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
           await chrome.tabs.reload(tab.id);
           await ensureTabLoaded(tab.id, url);
+          await chrome.tabs.update(tab.id, { active: true });
+          await ensureTabFocused(tab.id);
 
           const currentTabAfterReload = await chrome.tabs.get(tab.id);
           console.log("[Rewards] After reload:", currentTabAfterReload.url);
@@ -3181,7 +4070,7 @@ async function autoClickRewards() {
           await new Promise((r) => setTimeout(r, 2000));
         } else {
           console.log(
-            `[Rewards] No ready points claimed on dashboard (${claimResult.reason || "not_available"})`,
+            `[Rewards] No ready points claimed (${claimResult.reason || "not_available"})`,
           );
           const message =
             claimResult.reason === "not_ready"
@@ -3196,13 +4085,13 @@ async function autoClickRewards() {
 
       if (/rewards\.bing\.com\/earn/i.test(url)) {
         const attemptedQuestKeys = new Set();
-        const maxQuestCards = 8;
+        const maxQuestCards = 3;
 
         for (let i = 0; i < maxQuestCards; i++) {
-          if (timedOut()) {
-            console.warn("[Rewards] Timeout budget reached while processing quest cards for " + url);
-            await appendDebugLog("warn", "rewards", "Timeout budget reached for quest cards", { url });
-            return { status: "incomplete", reason: "quest_timeout", elapsedMs: Date.now() - startedAt };
+          if (timedOut() || remainingMs() < MIN_QUEST_REMAINING_BUDGET_MS) {
+            console.warn("[Rewards] Low budget reached while processing quest cards for " + url);
+            await appendDebugLog("warn", "rewards", "Budget low, finishing quest cards early to reserve time for main cards", { url, remainingMs: remainingMs() });
+            break;
           }
           await appendDebugLog("info", "quests", "Scanning for quest cards", { url });
           console.log("[Rewards] processRewardUrl: Scanning for quest cards...");
@@ -3230,14 +4119,15 @@ async function autoClickRewards() {
           await ensureTabFocused(tab.id);
           await new Promise((r) => setTimeout(r, 2000));
 
+          await enableRewardMobileEmulation();
           const attemptedActivityKeys = new Set();
-          const maxQuestActivities = 10;
+          const maxQuestActivities = 8;
 
           for (let j = 0; j < maxQuestActivities; j++) {
-            if (timedOut()) {
-              console.warn("[Rewards] Timeout budget reached while processing quest activities for " + url);
-              await appendDebugLog("warn", "rewards", "Timeout budget reached for quest activities", { url });
-              return { status: "incomplete", reason: "quest_activity_timeout", elapsedMs: Date.now() - startedAt };
+            if (timedOut() || remainingMs() < MIN_QUEST_REMAINING_BUDGET_MS) {
+              console.warn("[Rewards] Low budget reached while processing quest activities for " + url);
+              await appendDebugLog("warn", "rewards", "Budget low, finishing quest activities early", { url, remainingMs: remainingMs() });
+              break;
             }
             await appendDebugLog("info", "quests", "Scanning for quest activities for " + nextQuest.href);
             console.log("[Rewards] processRewardUrl: Scanning for quest activities...");
@@ -3266,12 +4156,12 @@ async function autoClickRewards() {
             );
 
             const childBaselineIds = await getCurrentTabIdSet();
-        const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
-        const structuredClickResult = clickResult && typeof clickResult === "object"
-          ? clickResult
-          : { clicked: !!clickResult, href: "" };
-        const wasClicked = structuredClickResult.clicked;
-        const targetHref = structuredClickResult.href;
+            const clickResult = await clickQuestActivity(tab.id, nextActivity.key);
+            const structuredClickResult = clickResult && typeof clickResult === "object"
+              ? clickResult
+              : { clicked: !!clickResult, href: "" };
+            const wasClicked = structuredClickResult.clicked;
+            const targetHref = structuredClickResult.href;
 
             await new Promise((r) => setTimeout(r, REWARDS_SETTLE_MS));
 
@@ -3281,7 +4171,7 @@ async function autoClickRewards() {
             );
 
             // Fallback: If no new tab opened, but we have a valid href, manually open it to register the punch
-            if (newTabIds.length === 0 && wasClicked && (targetHref || nextActivity.href)) {
+            if (newTabIds.length === 0 && (wasClicked || targetHref || nextActivity.href)) {
               let fullHref = targetHref || nextActivity.href;
               if (fullHref.startsWith("/")) {
                 fullHref = "https://rewards.bing.com" + fullHref;
@@ -3305,6 +4195,22 @@ async function autoClickRewards() {
               try {
                 // Ensure the tab is active so that tracking pixels fire properly
                 await chrome.tabs.update(childTabId, { active: true });
+                try {
+                  await chrome.scripting.executeScript({
+                    target: { tabId: childTabId },
+                    world: "MAIN",
+                    args: [REWARD_MOBILE_USER_AGENT],
+                    func: (ua) => {
+                      try {
+                        Object.defineProperty(navigator, "userAgent", { get: () => ua, configurable: true });
+                        if (navigator.userAgentData) {
+                          Object.defineProperty(navigator.userAgentData, "mobile", { get: () => true, configurable: true });
+                          Object.defineProperty(navigator.userAgentData, "platform", { get: () => "Android", configurable: true });
+                        }
+                      } catch {}
+                    },
+                  });
+                } catch {}
                 await waitForTabComplete(childTabId);
                 await humanScrollOnTab(childTabId);
               } catch { }
@@ -3352,9 +4258,20 @@ async function autoClickRewards() {
       // unrelated links (redeem, shop, etc.) that aren't reward cards.
       let targetSectionIds = rewardSectionIds;
       if (/rewards\.bing\.com\/earn/i.test(url)) {
-        targetSectionIds = ["moreactivities"];
+        targetSectionIds = ["moreactivities", "exploreonbing"];
       } else if (/rewards\.bing\.com\/dashboard/i.test(url)) {
-        targetSectionIds = ["dailyset", "moreactivities"];
+        targetSectionIds = ["dailyset", "ext-restored-dailyset", "moreactivities", "offers"];
+        try {
+          const hasDailySetCards = await executeRewardsScript(tab.id, {
+            func: () => Boolean((document.getElementById("dailyset") || document.getElementById("ext-restored-dailyset"))?.querySelector("a[href]")),
+          });
+          if (!hasDailySetCards) {
+            console.log("[Rewards] Missing daily set on dashboard, fetching from panelflyout fallback...");
+            await fetchAndRestoreDailySet(tab.id);
+          }
+        } catch (dsErr) {
+          console.warn("[Rewards] Daily set check/restore error:", dsErr);
+        }
       }
 
       // Re-scan after every click. Hydration retries are independent from the
@@ -3362,12 +4279,6 @@ async function autoClickRewards() {
       const cardAttemptCounts = new Map();
       const maxRewardCardClicks = 8;
       const maxAttemptsPerCard = 2;
-      let clickCount = 0;
-      let scanCount = 0;
-      let hydrationRetryCount = 0;
-      let consecutiveHydrationRetries = 0;
-      let lastHydrationStatus = "partial";
-      let lastScanSummary = null;
       let pendingVerification = null;
       let currentDocumentHydrated = false;
 
@@ -3375,7 +4286,7 @@ async function autoClickRewards() {
       const isRelevantScanSection = (section) =>
         targetSectionIds.includes(section.sectionId) ||
         (section.sectionId === "earn_fallback" && targetSectionIds.includes("moreactivities")) ||
-        (section.sectionId === "dashboard_fallback" && targetSectionIds.includes("dailyset"));
+        (section.sectionId === "dashboard_fallback" && (targetSectionIds.includes("dailyset") || targetSectionIds.includes("ext-restored-dailyset")));
       const summarizeScanSections = (sections) => {
         const relevantSections = sections.filter(isRelevantScanSection);
         return {
@@ -3405,17 +4316,6 @@ async function autoClickRewards() {
           sectionIds: relevantSections.map((section) => section.sectionId),
         };
       };
-      const makeIncompleteOutcome = (reason) => ({
-        status: "incomplete",
-        reason,
-        elapsedMs: Date.now() - startedAt,
-        remainingMs: remainingMs(),
-        clickCount,
-        scanCount,
-        hydrationRetryCount,
-        hydrationStatus: lastHydrationStatus,
-        scan: lastScanSummary,
-      });
 
       while (true) {
         if (timedOut()) {
@@ -3435,6 +4335,18 @@ async function autoClickRewards() {
           currentDocumentHydrated,
         );
         if (timedOut()) return makeIncompleteOutcome("hydration_timeout");
+
+        if (scanCount === 1 && /rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+          try {
+            const initialClaim = await claimReadyPoints(tab.id);
+            if (initialClaim.clicked) {
+              await appendDebugLog("success", "rewards", `Claimed ${initialClaim.claimedPoints} ready point(s) after hydration`, { url });
+              await sleepWithinDeadline(1500);
+            }
+          } catch (e) {
+            console.warn("[Rewards] initial claimReadyPoints failed:", e);
+          }
+        }
 
         const initialStableEmptySince = Number.isFinite(domReadyResult?.stableEmptySince)
           ? domReadyResult.stableEmptySince
@@ -3457,6 +4369,9 @@ async function autoClickRewards() {
         lastScanSummary = summarizeScanSections(scanSections);
         if (rewardCards.length > 0 || rewardCardsResult?.hydrated === true) {
           currentDocumentHydrated = true;
+        }
+        if (rewardCards.length > 0) {
+          consecutiveHydrationRetries = 0;
         }
 
         await appendDebugLog("info", "rewards", `Found ${rewardCards.length} reward card(s) to click`, {
@@ -3496,6 +4411,17 @@ async function autoClickRewards() {
         }
 
         if (lastHydrationStatus === "stable_empty") {
+          if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+            try {
+              const claimRes = await claimReadyPoints(tab.id);
+              if (claimRes.clicked) {
+                await appendDebugLog("success", "rewards", `Claimed ${claimRes.claimedPoints} ready point(s) on stable empty`, { url });
+                await sleepWithinDeadline(1500);
+              }
+            } catch (e) {
+              console.warn("[Rewards] claimReadyPoints on stable empty failed:", e);
+            }
+          }
           return {
             status: "completed",
             reason: "stable_empty",
@@ -3509,6 +4435,43 @@ async function autoClickRewards() {
         }
 
         if (rewardCards.length === 0) {
+          const allRelevantHydrated =
+            scanSections.length > 0 &&
+            scanSections
+              .filter(isRelevantScanSection)
+              .every((s) => !s.exists || s.hydrated === true || (s.directRoundedAnchors === 0 && s.completed === 0 && s.accepted === 0));
+          if (
+            lastScanSummary &&
+            allRelevantHydrated &&
+            lastHydrationStatus !== "partial" &&
+            lastHydrationStatus !== "header_only" &&
+            lastScanSummary.hydratedSectionCount > 0 &&
+            lastScanSummary.completedCount > 0 &&
+            lastScanSummary.acceptedCount === 0
+          ) {
+            if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+              try {
+                const claimRes = await claimReadyPoints(tab.id);
+                if (claimRes.clicked) {
+                  await appendDebugLog("success", "rewards", `Claimed ${claimRes.claimedPoints} ready point(s) on all cards completed`, { url });
+                  await sleepWithinDeadline(1500);
+                }
+              } catch (e) {
+                console.warn("[Rewards] claimReadyPoints on all cards completed failed:", e);
+              }
+            }
+            return {
+              status: "completed",
+              reason: "stable_empty",
+              elapsedMs: Date.now() - startedAt,
+              clickCount,
+              scanCount,
+              hydrationRetryCount,
+              hydrationStatus: "stable_empty",
+              scan: lastScanSummary,
+            };
+          }
+
           hydrationRetryCount++;
           consecutiveHydrationRetries++;
           const retryDelayMs = getRewardHydrationRetryDelay(consecutiveHydrationRetries);
@@ -3529,7 +4492,7 @@ async function autoClickRewards() {
             sectionIds: lastScanSummary.sectionIds,
           });
 
-          if (!(await sleepWithinDeadline(retryDelayMs))) {
+          if (consecutiveHydrationRetries > 3 || !(await sleepWithinDeadline(retryDelayMs))) {
             return makeIncompleteOutcome("hydration_timeout");
           }
 
@@ -3598,91 +4561,167 @@ async function autoClickRewards() {
         });
 
         const childBaselineIds = await getCurrentTabIdSet();
-        const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
-        const structuredClickResult = clickResult && typeof clickResult === "object"
-          ? clickResult
-          : { clicked: !!clickResult, attempted: !!clickResult, domChanged: false, href: "" };
-        const wasClicked = structuredClickResult.clicked === true;
-        const clickAttempted = structuredClickResult.attempted === true;
-        const domChanged = structuredClickResult.domChanged === true;
-        const resultHref = structuredClickResult.href || "";
-        let manualFallbackAttempted = false;
-        let usedManualFallback = false;
-
-        await sleepWithinDeadline(REWARDS_SETTLE_MS);
-
-        // Collect only child tabs spawned by this card click. A card can open
-        // more than one tab, and the user may close one manually while we run.
-        const newTabIds = await collectNewChildTabIds(
-          childBaselineIds,
-          `reward card ${clickCount}`,
+        const isRestoredDailySet = Boolean(
+          card.isRestored ||
+          (card.key && /Global_DailySet|ext-restored/i.test(card.key)) ||
+          targetSectionIds.includes("ext-restored-dailyset")
         );
 
-        if (
-          !timedOut() &&
-          newTabIds.length === 0 &&
-          !domChanged &&
-          (card.href || resultHref)
-        ) {
-          let fullHref = resultHref || card.href;
-          if (fullHref.startsWith("/")) {
-            fullHref = "https://rewards.bing.com" + fullHref;
-          }
-          if (fullHref.startsWith("http")) {
-            manualFallbackAttempted = true;
-            await appendDebugLog("warn", "rewards", "Reward card did not open a child tab, falling back to manual open", {
-              url: fullHref,
-              clicked: wasClicked,
-              domChanged,
-            });
-            console.log("[Rewards] Reward card did not open a child tab, falling back to manual open: " + fullHref);
-            try {
-              const fallbackTab = await chrome.tabs.create({
-                url: fullHref,
-                active: true,
-                windowId,
-                openerTabId: tab.id,
-              });
-              await trackFallbackChildTab(fallbackTab, newTabIds);
-              usedManualFallback = true;
-              await waitForTabComplete(
-                fallbackTab.id,
-                Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
-              );
-            } catch (e) {
-              console.warn("[Rewards] Fallback tab creation failed:", e);
-            }
-          }
+        if (isRestoredDailySet) {
+          await enableRewardMobileEmulation();
         }
 
-        // Scroll like a human on each child tab so Bing registers the visit.
-        for (const childTabId of newTabIds) {
-          if (timedOut()) break;
-          try {
-            await chrome.tabs.update(childTabId, { active: true });
-            await waitForTabComplete(
-              childTabId,
-              Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
-            );
-            const quizResult = await awaitWithinDeadline(
-              handleRewardChildTab(childTabId),
-              { handled: false, completed: false, reason: "deadline" },
-            );
-            if (quizResult?.handled) {
-              await appendDebugLog("info", "rewards", "Handled reward quiz child tab", {
-                completed: quizResult.completed,
-                clicks: quizResult.clicks,
-                reason: quizResult.reason,
-                diagnostics: quizResult.diagnostics,
+        let structuredClickResult;
+        let wasClicked = false;
+        let clickAttempted = false;
+        let domChanged = false;
+        let resultHref = "";
+        let manualFallbackAttempted = false;
+        let usedManualFallback = false;
+        const newTabIds = [];
+
+        try {
+          const clickResult = await clickRewardCard(tab.id, card.key, targetSectionIds);
+          structuredClickResult = clickResult && typeof clickResult === "object"
+            ? clickResult
+            : { clicked: !!clickResult, attempted: !!clickResult, domChanged: false, href: "" };
+          wasClicked = structuredClickResult.clicked === true;
+          clickAttempted = structuredClickResult.attempted === true;
+          domChanged = structuredClickResult.domChanged === true;
+          resultHref = structuredClickResult.href || "";
+
+          await sleepWithinDeadline(REWARDS_SETTLE_MS);
+
+          // Collect only child tabs spawned by this card click.
+          const collectedIds = await collectNewChildTabIds(
+            childBaselineIds,
+            `reward card ${clickCount}`,
+          );
+          newTabIds.push(...collectedIds);
+
+          if (
+            !timedOut() &&
+            newTabIds.length === 0 &&
+            !domChanged &&
+            (card.href || resultHref)
+          ) {
+            let fullHref = resultHref || card.href;
+            if (fullHref.startsWith("/")) {
+              fullHref = "https://rewards.bing.com" + fullHref;
+            }
+            if (fullHref.startsWith("http")) {
+              manualFallbackAttempted = true;
+              await appendDebugLog("warn", "rewards", "Reward card did not open a child tab, falling back to manual open", {
+                url: fullHref,
+                clicked: wasClicked,
+                domChanged,
               });
-              await sleepWithinDeadline(2000);
-            } else if (!timedOut()) {
-              await awaitWithinDeadline(humanScrollOnTab(childTabId), undefined);
-              if (!timedOut()) {
-                await waitForRewardSearchCredit(childTabId, Math.min(12000, remainingMs()));
+              console.log("[Rewards] Reward card did not open a child tab, falling back to manual open: " + fullHref);
+              try {
+                const fallbackTab = await chrome.tabs.create({
+                  url: fullHref,
+                  active: true,
+                  windowId,
+                  openerTabId: tab.id,
+                });
+                await trackFallbackChildTab(fallbackTab, newTabIds);
+                usedManualFallback = true;
+                await waitForTabComplete(
+                  fallbackTab.id,
+                  Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
+                );
+              } catch (e) {
+                console.warn("[Rewards] Fallback tab creation failed:", e);
               }
             }
-          } catch { }
+          }
+
+          // Scroll like a human on each child tab so Bing registers the visit.
+          for (const childTabId of newTabIds) {
+            if (timedOut()) break;
+            try {
+              await chrome.tabs.update(childTabId, { active: true });
+              await waitForTabComplete(
+                childTabId,
+                Math.max(1000, Math.min(TAB_LOAD_TIMEOUT_MS, remainingMs())),
+              );
+
+              if (isRestoredDailySet) {
+                try {
+                  const cached = await chrome.storage.local.get(["cachedDailySetData"]);
+                  const matching = cached?.cachedDailySetData?.cards?.find((c) =>
+                    (card.offerId && c.offerId === card.offerId) ||
+                    (card.key && c.name && card.key.includes(c.name)) ||
+                    (card.href && c.destinationUrl && (card.href.includes(c.name) || c.destinationUrl.includes(card.href)))
+                  );
+                  const reportPayload = {
+                    activityType: card.activityType || matching?.activityType || "bingredirect",
+                    offerId: card.offerId || matching?.offerId || matching?.name || "",
+                    authKey: card.authKey || matching?.hash || "",
+                    userId: card.userId || cached?.cachedDailySetData?.userId || "",
+                  };
+
+                  await chrome.scripting.executeScript({
+                    target: { tabId: childTabId },
+                    world: "MAIN",
+                    args: [REWARD_MOBILE_USER_AGENT, reportPayload],
+                    func: async (ua, payload) => {
+                      try {
+                        Object.defineProperty(navigator, "userAgent", { get: () => ua, configurable: true });
+                        if (navigator.userAgentData) {
+                          Object.defineProperty(navigator.userAgentData, "mobile", { get: () => true, configurable: true });
+                          Object.defineProperty(navigator.userAgentData, "platform", { get: () => "Android", configurable: true });
+                        }
+                      } catch {}
+
+                      if (payload && payload.offerId && payload.authKey) {
+                        try {
+                          await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+                            method: "POST",
+                            headers: { "Content-Type": "text/plain;charset=UTF-8" },
+                            credentials: "include",
+                            body: JSON.stringify({
+                              ActivityType: payload.activityType || "bingredirect",
+                              ActivitySubType: "",
+                              OfferId: payload.offerId,
+                              Channel: "BingFlyout",
+                              PartnerId: "BingRewards",
+                              UserId: payload.userId || "",
+                              AuthKey: payload.authKey,
+                              ActivityCount: 1,
+                            }),
+                          });
+                        } catch {}
+                      }
+                    },
+                  });
+                } catch {}
+              }
+
+              const quizResult = await awaitWithinDeadline(
+                handleRewardChildTab(childTabId),
+                { handled: false, completed: false, reason: "deadline" },
+              );
+              if (quizResult?.handled) {
+                await appendDebugLog("info", "rewards", "Handled reward quiz child tab", {
+                  completed: quizResult.completed,
+                  clicks: quizResult.clicks,
+                  reason: quizResult.reason,
+                  diagnostics: quizResult.diagnostics,
+                });
+                await sleepWithinDeadline(2000);
+              } else if (!timedOut()) {
+                await awaitWithinDeadline(humanScrollOnTab(childTabId), undefined);
+                if (!timedOut()) {
+                  await waitForRewardSearchCredit(childTabId, Math.min(8000, remainingMs()));
+                }
+              }
+            } catch { }
+          }
+        } finally {
+          if (isRestoredDailySet) {
+            await disableRewardMobileEmulation();
+          }
         }
 
         const cardCleanupResult = newTabIds.length
@@ -3694,6 +4733,28 @@ async function autoClickRewards() {
         ]);
 
         const effectiveHref = resultHref || card.href;
+
+        // Optimistically mark restored card completed in DOM if tab was processed
+        if (newTabIds.length > 0 || domChanged || wasClicked) {
+          try {
+            await executeRewardsScript(tab.id, {
+              args: [card.key || effectiveHref || ""],
+              func: (key) => {
+                if (typeof window.markRestoredCardCompleted === "function") {
+                  window.markRestoredCardCompleted(key);
+                }
+              },
+            });
+          } catch { }
+        }
+
+        // Revalidate server state if restored daily set was processed
+        if (isRestoredDailySet && (newTabIds.length > 0 || domChanged || wasClicked)) {
+          try {
+            await fetchAndRestoreDailySet(tab.id, { forceFresh: true });
+          } catch {}
+        }
+
         const noEffect = !effectiveHref && newTabIds.length === 0 && !domChanged;
         const evidence = {
           childTab: newTabIds.length > 0,
@@ -3767,6 +4828,11 @@ async function autoClickRewards() {
           return makeIncompleteOutcome("unexpected_redirect");
         }
 
+        if (/rewards\.bing\.com\/dashboard/i.test(url)) {
+          try {
+            await fetchAndRestoreDailySet(tab.id, { forceFresh: true });
+          } catch {}
+        }
         await injectDomHelpers(tab.id);
         await sleepWithinDeadline(1500);
       }
@@ -3788,7 +4854,26 @@ async function autoClickRewards() {
           ...finalCleanupResult.closedIds,
           ...finalCleanupResult.missingIds,
         ]);
-        await closeChildTabs(tab.id, 4, 1200, windowId);
+        const needsPolling = spawnedTabIds.size > 0 || clickCount > 0;
+        if (needsPolling) {
+          await closeChildTabs(tab.id, 4, 1200, windowId);
+        } else {
+          await closeChildTabs(tab.id, 1, 0, windowId);
+        }
+        if (/rewards\.bing\.com\/(?:dashboard|earn)/i.test(url)) {
+          try {
+            const claimRes = await claimReadyPoints(tab.id);
+            if (claimRes.clicked) {
+              await appendDebugLog("success", "rewards", `Claimed ${claimRes.claimedPoints} ready point(s) before closing tab`, { url });
+              await sleepWithinDeadline(1500);
+            }
+          } catch {}
+        }
+        if (/rewards\.bing\.com\/dashboard/i.test(url)) {
+          try {
+            await fetchAndRestoreDailySet(tab.id, { forceFresh: true });
+          } catch {}
+        }
         try {
           await chrome.tabs.remove(tab.id);
           console.log(`[Rewards] Closed tab for ${url}`);
@@ -3858,8 +4943,26 @@ async function autoClickRewards() {
       });
     }
   }
+
+  // Check and perform Visual Search if not yet completed for today
+  try {
+    const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", { credentials: "include" });
+    if (flyoutRes.ok) {
+      const flyoutHtml = await flyoutRes.text();
+      const yourActivity = extractYourActivityFromFlyoutHtml(flyoutHtml);
+      const vs = yourActivity?.activities?.find((a) => a.id === "visualsearch");
+      if (vs && !vs.completed) {
+        await appendDebugLog("info", "rewards", "Auto-executing Visual Search after rewards run", { isEnabled: vs.isEnabled });
+        await performVisualSearch();
+      }
+    }
+  } catch (vsErr) {
+    console.warn("[Rewards] Visual Search execution check error:", vsErr);
+  }
+
   return rewardOutcomes;
 }
+globalThis.autoClickRewards = autoClickRewards;
 // ---------------- Bing search logic ----------------
 async function typeInBing(query, perCharDelayMs = 80) {
   console.log("[Search-Debug] typeInBing: Starting typing simulation for query: " + query);
@@ -4050,6 +5153,150 @@ async function ensureTabLoaded(tabId, expectedUrl, options = {}) {
     error: String(lastError),
   });
   throw lastError || new Error(`failed to load ${expectedUrl}`);
+}
+
+async function performVisualSearch(targetWindowId) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  await appendDebugLog("info", "rewards", "Starting Visual Search automation");
+  let tab = null;
+  try {
+    const createProps = {
+      url: "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES",
+      active: true,
+    };
+    if (targetWindowId) createProps.windowId = targetWindowId;
+    tab = await chrome.tabs.create(createProps);
+    if (!tab?.id) throw new Error("Failed to create visual search tab");
+
+    await waitForTabComplete(tab.id, 15000);
+    await sleep(2000);
+
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: async () => {
+        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+        const btn = document.querySelector("#sb_sbi");
+        if (btn) btn.click();
+        await delay(1200);
+
+        let input = document.querySelector("#sb_fileinput");
+        if (!input) {
+          for (let i = 0; i < 6; i++) {
+            await delay(500);
+            input = document.querySelector("#sb_fileinput");
+            if (input) break;
+          }
+        }
+        if (!input) return { ok: false, error: "file_input_missing" };
+
+        const canvas = document.createElement("canvas");
+        canvas.width = 100;
+        canvas.height = 100;
+        const ctx = canvas.getContext("2d");
+        const hue = Math.floor(Math.random() * 360);
+        ctx.fillStyle = `hsl(${hue}, 75%, 50%)`;
+        ctx.fillRect(0, 0, 100, 100);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(25, 25, 50, 50);
+
+        const dataUrl = canvas.toDataURL("image/png");
+        const b64 = dataUrl.split(",")[1];
+        const bin = atob(b64);
+        const u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+
+        const file = new File([u8], "vs_query.png", { type: "image/png" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return { ok: true };
+      },
+    });
+
+    const execRes = result?.[0]?.result;
+    if (!execRes?.ok) {
+      await appendDebugLog("warn", "rewards", "Visual search injection outcome", execRes);
+    }
+
+    // Wait for search redirect
+    const initialUrl = "https://www.bing.com/?features=vsstreak,vstooltip&form=ML2XES";
+    const startRedirect = Date.now();
+    let redirected = false;
+    while (Date.now() - startRedirect < 12000) {
+      try {
+        const curTab = await chrome.tabs.get(tab.id);
+        const curUrl = curTab.url || curTab.pendingUrl || "";
+        if (curUrl && curUrl !== initialUrl && !curUrl.includes("features=vsstreak")) {
+          redirected = true;
+          break;
+        }
+      } catch {}
+      await sleep(500);
+    }
+    if (redirected) {
+      await waitForTabComplete(tab.id, 10000).catch(() => {});
+    } else {
+      await sleep(4000);
+    }
+
+    // Report activity to activate/advance streak
+    try {
+      const cached = await chrome.storage.local.get(["cachedDailySetData"]);
+      const userId = cached?.cachedDailySetData?.userId || "";
+      const reportPayload = {
+        ActivityType: 714,
+        ActivitySubType: "",
+        OfferId: "visualsearch_streak_activation_v2",
+        Channel: "BingFlyout",
+        PartnerId: "BingRewards",
+        UserId: userId,
+        AuthKey: "",
+        ActivityCount: 1,
+      };
+
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        args: [reportPayload],
+        func: async (payload) => {
+          try {
+            await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+              method: "POST",
+              headers: { "Content-Type": "text/plain;charset=UTF-8" },
+              credentials: "include",
+              body: JSON.stringify(payload),
+            });
+          } catch {}
+        },
+      }).catch(() => {});
+
+      await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        credentials: "include",
+        body: JSON.stringify(reportPayload),
+      }).catch(() => {});
+    } catch (reportErr) {
+      console.warn("[Rewards] Visual Search reportactivity error:", reportErr);
+    }
+
+    await sleep(2000);
+    await appendDebugLog("info", "rewards", "Visual search completed successfully");
+    return { ok: true };
+  } catch (err) {
+    console.error("[Rewards] Visual Search error:", err);
+    await appendDebugLog("error", "rewards", "Visual Search failed", { error: String(err) });
+    return { ok: false, error: String(err) };
+  } finally {
+    if (tab?.id) {
+      try {
+        await chrome.tabs.remove(tab.id);
+      } catch {}
+    }
+  }
 }
 
 async function openBingAndType(query) {
@@ -4360,27 +5607,40 @@ async function runTask() {
     });
 
     // 3. Final sweep for rewards (second pass)
-    console.log("⚡ Running second pass for Bing Rewards auto click...");
-    await appendDebugLog("info", "rewards", "Second Rewards phase started");
-    try {
-      await ensureInternetOrThrow("rewards_second_pass_before");
-      const secondRewardOutcomes = await autoClickRewards();
-      await ensureInternetOrThrow("rewards_second_pass_after");
-      const secondIncompleteRewards = secondRewardOutcomes.filter(
-        (outcome) => outcome.status !== "completed",
-      );
+    const firstPassAllBlocked =
+      firstRewardOutcomes.length > 0 &&
+      firstRewardOutcomes.every((outcome) => outcome.reason === "page_scripting_blocked");
+
+    if (firstPassAllBlocked) {
+      console.log("[Rewards] Skipping second rewards phase: page scripting blocked by browser policy on all rewards URLs");
       await appendDebugLog(
-        secondIncompleteRewards.length ? "warn" : "success",
+        "info",
         "rewards",
-        secondIncompleteRewards.length
-          ? "Second Rewards phase completed with incomplete URL(s)"
-          : "Second Rewards phase completed",
-        { outcomes: secondRewardOutcomes },
+        "Skipping second rewards phase: page scripting blocked on all rewards URLs by browser policy",
       );
-    } catch (e) {
-      if (isInternetUnavailableError(e)) throw e;
-      console.warn("[Rewards] Second pass failed:", e);
-      await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
+    } else {
+      console.log("⚡ Running second pass for Bing Rewards auto click...");
+      await appendDebugLog("info", "rewards", "Second Rewards phase started");
+      try {
+        await ensureInternetOrThrow("rewards_second_pass_before");
+        const secondRewardOutcomes = await autoClickRewards();
+        await ensureInternetOrThrow("rewards_second_pass_after");
+        const secondIncompleteRewards = secondRewardOutcomes.filter(
+          (outcome) => outcome.status !== "completed",
+        );
+        await appendDebugLog(
+          secondIncompleteRewards.length ? "warn" : "success",
+          "rewards",
+          secondIncompleteRewards.length
+            ? "Second Rewards phase completed with incomplete URL(s)"
+            : "Second Rewards phase completed",
+          { outcomes: secondRewardOutcomes },
+        );
+      } catch (e) {
+        if (isInternetUnavailableError(e)) throw e;
+        console.warn("[Rewards] Second pass failed:", e);
+        await appendDebugLog("error", "rewards", "Second Rewards phase failed: " + e.message);
+      }
     }
 
     await markRunCompletedToday();
@@ -4446,9 +5706,9 @@ async function startRun(source = "unknown") {
 // ---------------- Scheduling ----------------
 async function scheduleAlarm({ clearDelayed = false } = {}) {
   const cfg = await getConfig();
-  await chrome.alarms.clear(ALARM_NAME);
 
   if (!cfg.enabled) {
+    await chrome.alarms.clear(ALARM_NAME);
     await clearDelayedStart();
     await clearInternetRetry();
     await chrome.storage.sync.set({ nextRunAt: null });
@@ -4461,6 +5721,22 @@ async function scheduleAlarm({ clearDelayed = false } = {}) {
   const profileSlot = await getProfileSlot();
   const slotOffsetMinutes = getSlotOffsetMinutes(profileSlot);
   const next = computeNextRunDate(cfg.time, slotOffsetMinutes);
+
+  const existingAlarm = await chrome.alarms.get(ALARM_NAME);
+  const isAlreadyScheduled =
+    existingAlarm &&
+    Math.abs(existingAlarm.scheduledTime - next.getTime()) < 1000;
+
+  if (isAlreadyScheduled && !clearDelayed) {
+    const data = await chrome.storage.sync.get("nextRunAt");
+    if (data.nextRunAt !== existingAlarm.scheduledTime) {
+      await chrome.storage.sync.set({ nextRunAt: existingAlarm.scheduledTime });
+    }
+    await updateBadge();
+    return;
+  }
+
+  await chrome.alarms.clear(ALARM_NAME);
   chrome.alarms.create(ALARM_NAME, { when: next.getTime() });
   await chrome.storage.sync.set({ nextRunAt: next.getTime() });
   await updateBadge();
@@ -4541,7 +5817,168 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  const url = tab?.url || changeInfo?.url;
+  if (!url) return;
+
+  if (/rewards\.bing\.com\/dashboard/i.test(url)) {
+    try {
+      await fetchAndRestoreDailySet(tabId);
+    } catch (err) {
+      console.warn("[Rewards] tabs.onUpdated daily set restore error:", err);
+    }
+  }
+
+  // Also support manual clicks by user on restored Daily Set search tabs
+  if (changeInfo.status === "complete" && /bing\.com\/search\?/i.test(url) && /(?:Global_DailySet|REWARDSQUIZ_DailySet|sid:)/i.test(url)) {
+    try {
+      const cached = await chrome.storage.local.get(["cachedDailySetData"]);
+      const dailySet = cached?.cachedDailySetData;
+      if (dailySet && Array.isArray(dailySet.cards)) {
+        const matchingCard = dailySet.cards.find((c) => {
+          if (!c.hash) return false;
+          if (c.name && url.includes(c.name)) return true;
+          if (c.offerId && url.includes(c.offerId)) return true;
+          if (c.destinationUrl) {
+            try {
+              const destU = new URL(c.destinationUrl);
+              const destQ = destU.searchParams.get("q");
+              if (destQ && url.includes(destQ)) return true;
+              const destSid = destU.searchParams.get("sid");
+              if (destSid && url.includes(destSid)) return true;
+            } catch {}
+          }
+          return false;
+        });
+        if (matchingCard && !matchingCard.complete) {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            args: [{
+              activityType: matchingCard.activityType || "bingredirect",
+              offerId: matchingCard.offerId || matchingCard.name,
+              authKey: matchingCard.hash,
+              userId: dailySet.userId || "",
+            }],
+            func: async (payload) => {
+              if (!payload.offerId || !payload.authKey) return null;
+              try {
+                return await fetch("https://www.bing.com/msrewards/api/v1/reportactivity", {
+                  method: "POST",
+                  headers: { "Content-Type": "text/plain;charset=UTF-8" },
+                  credentials: "include",
+                  body: JSON.stringify({
+                    ActivityType: payload.activityType || "bingredirect",
+                    ActivitySubType: "",
+                    OfferId: payload.offerId,
+                    Channel: "BingFlyout",
+                    PartnerId: "BingRewards",
+                    UserId: payload.userId || "",
+                    AuthKey: payload.authKey,
+                    ActivityCount: 1,
+                  }),
+                }).then((r) => r.json());
+              } catch {}
+            },
+          });
+        }
+      }
+    } catch {}
+  }
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "GET_RESTORED_DAILY_SET") {
+    (async () => {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const cached = await chrome.storage.local.get(["cachedDailySetData", "cachedDailySetDate"]);
+        let data = cached?.cachedDailySetData;
+        const cachedDate = cached?.cachedDailySetDate;
+        if (!data || cachedDate !== today || !Array.isArray(data.cards) || data.cards.length === 0) {
+          if (cachedDate !== today) data = null;
+          const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+            credentials: "include",
+          });
+          if (flyoutRes.ok) {
+            const html = await flyoutRes.text();
+            data = extractDailySetFromFlyoutHtml(html);
+            if (data && data.cards.length > 0) {
+              await chrome.storage.local.set({ cachedDailySetData: data, cachedDailySetDate: today });
+            }
+            const actData = extractYourActivityFromFlyoutHtml(html);
+            if (actData && actData.activities?.length > 0) {
+              await chrome.storage.local.set({ cachedYourActivityData: actData, cachedYourActivityDate: today });
+            }
+          }
+        }
+        sendResponse({ ok: true, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+  if (msg.type === "GET_YOUR_ACTIVITY") {
+    (async () => {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const cached = await chrome.storage.local.get(["cachedYourActivityData", "cachedYourActivityDate"]);
+        let data = cached?.cachedYourActivityData;
+        const cachedDate = cached?.cachedYourActivityDate;
+        if (!data || cachedDate !== today || !Array.isArray(data.activities) || data.activities.length === 0) {
+          if (cachedDate !== today) data = null;
+          const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+            credentials: "include",
+          });
+          if (flyoutRes.ok) {
+            const html = await flyoutRes.text();
+            data = extractYourActivityFromFlyoutHtml(html);
+            if (data && data.activities?.length > 0) {
+              await chrome.storage.local.set({ cachedYourActivityData: data, cachedYourActivityDate: today });
+            }
+            const dailySetData = extractDailySetFromFlyoutHtml(html);
+            if (dailySetData && dailySetData.cards?.length > 0) {
+              await chrome.storage.local.set({ cachedDailySetData: dailySetData, cachedDailySetDate: today });
+            }
+          }
+        }
+        sendResponse({ ok: true, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+  if (msg.type === "TRIGGER_VISUAL_SEARCH") {
+    (async () => {
+      try {
+        const outcome = await performVisualSearch();
+        const flyoutRes = await fetch("https://www.bing.com/rewards/panelflyout", {
+          credentials: "include",
+        });
+        let data = null;
+        if (flyoutRes.ok) {
+          const html = await flyoutRes.text();
+          data = extractYourActivityFromFlyoutHtml(html);
+          const today = new Date().toISOString().slice(0, 10);
+          if (data && data.activities?.length > 0) {
+            await chrome.storage.local.set({ cachedYourActivityData: data, cachedYourActivityDate: today });
+          }
+        }
+        sendResponse({ ok: outcome?.ok ?? true, outcome, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+    return true;
+  }
+  if (msg.type === "RUN_REWARDS") {
+    autoClickRewards()
+      .then((outcomes) => sendResponse?.({ ok: true, outcomes }))
+      .catch((e) => sendResponse?.({ ok: false, error: String(e) }));
+    return true;
+  }
   if (msg.type === "RESCHEDULE") {
     scheduleAlarm({ clearDelayed: true })
       .then(() => sendResponse?.({ ok: true }))
@@ -4563,7 +6000,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const current = await chrome.storage.sync.get(["enabled", "time"]);
+  const current = await chrome.storage.sync.get(["enabled", "time", "searchesPerRun"]);
   const updates = {};
 
   if (current.enabled === undefined) {
@@ -4571,6 +6008,9 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
   if (!current.time || current.time === "08:00") {
     updates.time = DEFAULT_RUN_TIME;
+  }
+  if (current.searchesPerRun === undefined || current.searchesPerRun === 50 || current.searchesPerRun === 10) {
+    updates.searchesPerRun = DEFAULTS.searchesPerRun;
   }
   if (Object.keys(updates).length) {
     await chrome.storage.sync.set(updates);

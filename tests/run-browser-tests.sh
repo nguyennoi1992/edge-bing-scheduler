@@ -53,3 +53,4 @@ run_test() {
 run_test earn
 run_test earn-hydration
 run_test dashboard
+run_test dashboard-live

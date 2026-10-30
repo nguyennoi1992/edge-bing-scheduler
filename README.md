@@ -11,11 +11,13 @@ An automation extension for Microsoft Edge that helps you **complete Bing Reward
     * Configure a specific time to run every day (HH:MM, 24-hour format)
     * Manual **Run Now** option
 
-* 🎁 **Bing Rewards Auto-Click**
+* 🎁 **Bing Rewards Auto-Click & Activities**
 
-    * Automatically opens `rewards.bing.com`
+    * Automatically opens `rewards.bing.com` / `www.bing.com/rewards`
     * Clicks all **uncompleted activity cards** (Daily set, More activities)
     * Skips completed cards automatically
+    * **Your Activity Widget**: Track all 5 daily streaks (Bing, Daily Set, Edge, Mobile App, Visual Search) in Popup & Side Panel
+    * **Visual Search Automation**: 1-click automated Visual Search with canvas-generated image upload, activates and advances streak 🔥
 
 * 🔍 **Bing Search Automation**
 
@@ -39,11 +41,16 @@ An automation extension for Microsoft Edge that helps you **complete Bing Reward
 edge-bing-scheduler/
 ├─ manifest.json
 ├─ background.js
+├─ reward-dom-helpers.js
+├─ reward-scanner-helpers.js
+├─ script-result-helpers.js
 ├─ words.js
 ├─ popup.html
 ├─ popup.js
 ├─ options.html
-└─ options.js
+├─ options.js
+├─ docs/
+└─ tests/
 ```
 
 ---
@@ -99,9 +106,28 @@ Open **Options** page:
 
 ---
 
+## 📚 Documentation & Technical Guides
+
+Tất cả tài liệu kỹ thuật, kiến trúc và quy trình kiểm thử được tổ chức trong thư mục `docs/`:
+
+* 📖 [**Multi-Profile Testing & Verification Guide**](docs/MULTI_PROFILE_TESTING_AND_VERIFICATION_GUIDE.md)  
+  Quy trình chuẩn rà soát, sao chép profile an toàn, chạy kiểm thử qua virtual display (`Xvfb`), xác nhận hoàn thành thẻ (`complete: true`) trên backend Microsoft Rewards.
+* 🛠️ [**Verification & Claim Fix: Dual-Profile Live (2026-10-25 - 2026-10-26)**](docs/verification-and-claim-fix-2026-10-25-dual-profile-live.md)
+  Báo cáo kỹ thuật chi tiết ngày 25/10 - 26/10/2026: Sửa lỗi claim thẻ 0 điểm ("Ready to claim 0 Claim"), đồng bộ regex MAIN-world, kiểm chứng reload extension, kết quả verifier 3/3 thẻ exit 0 và targeted claim proof thành công trên cả 2 profile.
+* 🔍 [**Investigation & Fix: Flight `vsstreak` & Card Completion**](docs/investigation-and-fix-2026-10-15-dashboard-cards-and-profile1-streak.md)  
+  Báo cáo chuyên sâu về flighting `vsstreak`, cơ chế phục hồi `#ext-restored-dailyset`, endpoint `/msrewards/api/v1/reportactivity` và kiểm chứng đa profile.
+* ⚡ [**Rewards Hydration & Scanning Optimization**](docs/optimization-2026-10-12-rewards-hydration-scheduler.md)  
+  Kiến trúc quét DOM, phát hiện trạng thái hydration và phân loại section an toàn.
+* 🛡️ [**Edge Gallery Protection & Workarounds (2026-10-30)**](docs/edge-gallery-protection-and-workarounds.md)  
+  Nghiên cứu chuyên sâu về cơ chế lỗi "The extensions gallery cannot be scripted" trên Edge, kiến trúc chuyển dịch domain sang `www.bing.com`, kích hoạt Visual Search và render native trong extension UI.
+* 🛡️ [**Edge Rewards Scripting Protected Page Handling**](docs/bugfix-2026-08-22-edge-rewards-scripting-blocked.md)  
+  Xử lý ngoại lệ chính sách bảo vệ trang của Microsoft Edge.
+
+---
+
 ## Browser Tests
 
-Run the complete Node, syntax, manifest, and Microsoft Edge test suite:
+Run the complete Node (32 tests), syntax, manifest, and Microsoft Edge test suite:
 
 ```bash
 tests/run-all-tests.sh

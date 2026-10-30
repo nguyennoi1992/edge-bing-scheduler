@@ -1,27 +1,38 @@
 import {
+  CLAIM_MATCH_RE,
+  CLAIM_TEXT_RE,
+  READY_TO_CLAIM_LABEL_RE,
   buildRewardCardKey,
   classifyRewardScanState,
   isActionableRewardCard,
-  isCompletedText,
+  isCardCompleted,
   isDashboardRewardHref,
   normalizeRewardText,
+  parsePointsFromText,
 } from "../../reward-dom-helpers.js";
 
 function isVisible(element) {
-  if (!element || typeof element.getBoundingClientRect !== "function") return false;
-  const rect = element.getBoundingClientRect();
+  if (!element) return false;
   const style = getComputedStyle(element);
-  return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-}
-
-function isCardCompleted(card) {
-  const successBadge = card.querySelector("[class*='statusSuccess']");
-  if (successBadge?.querySelector("svg")) return true;
-
-  for (const element of card.querySelectorAll("[class*='metadata'], [class*='fgCtrlNeutralSecondary']")) {
-    if (isCompletedText(element.textContent || "")) return true;
+  if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+    return false;
   }
-  return isCompletedText(card.innerText || card.textContent || "");
+  if (typeof element.checkVisibility === "function") {
+    if (!element.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) {
+      return false;
+    }
+  }
+  if (typeof element.getBoundingClientRect === "function") {
+    const rect = element.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return true;
+    for (const child of element.children || []) {
+      if (typeof child.getBoundingClientRect === "function") {
+        const childRect = child.getBoundingClientRect();
+        if (childRect.width > 0 && childRect.height > 0) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function getCardMeta(card, rootNode) {
@@ -138,3 +149,93 @@ export async function finishBrowserTest(name, callback) {
     console.error(error);
   }
 }
+
+export function findReadyToClaimCard(rootNode = document) {
+  const directButtons = Array.from(rootNode.querySelectorAll("button, [role='button'], a[role='button'], [data-react-aria-pressable='true']"));
+  for (const cardButton of directButtons) {
+    if (!isVisible(cardButton) || cardButton.disabled || cardButton.getAttribute("aria-disabled") === "true") continue;
+    const text = normalizeRewardText(cardButton.innerText || cardButton.textContent || "");
+    if (READY_TO_CLAIM_LABEL_RE.test(text)) {
+      const points = parsePointsFromText(text);
+      if (points > 0) return { cardButton, points };
+    }
+  }
+
+  const elements = Array.from(rootNode.querySelectorAll("*"));
+  const labels = elements.filter((el) => {
+    if (!(el instanceof HTMLElement)) return false;
+    if (!isVisible(el)) return false;
+    const text = normalizeRewardText(el.innerText || el.textContent || "");
+    return READY_TO_CLAIM_LABEL_RE.test(text);
+  });
+
+  for (const labelEl of labels) {
+    const cardButton = labelEl.closest("button, [role='button'], a[role='button'], [data-react-aria-pressable='true']");
+    if (!cardButton || !isVisible(cardButton)) continue;
+    if (cardButton.disabled || cardButton.getAttribute("aria-disabled") === "true") continue;
+    const points = parsePointsFromText(cardButton.innerText || cardButton.textContent || "");
+    if (points > 0) {
+      return { cardButton, points };
+    }
+  }
+
+  return null;
+}
+
+export function findDialogClaimButton(rootNode = document) {
+  const elements = Array.from(rootNode.querySelectorAll("*"));
+  const dialogs = elements.filter((el) => {
+    if (!(el instanceof HTMLElement)) return false;
+    if (!isVisible(el)) return false;
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    return (
+      role === "dialog" ||
+      el.tagName.toLowerCase() === "dialog" ||
+      el.classList?.contains("shadow-shadowFlyout") ||
+      el.classList?.contains("bg-flyout") ||
+      el.getAttribute("aria-modal") === "true"
+    );
+  });
+
+  if (!dialogs.length) return null;
+  const topDialogs = dialogs.filter((d) => !dialogs.some((other) => other !== d && other.contains(d)));
+
+  for (const scope of topDialogs) {
+    const candidateLabels = Array.from(scope.querySelectorAll("*")).filter((el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      if (!isVisible(el)) return false;
+      const text = normalizeRewardText(el.innerText || el.textContent || "");
+      return CLAIM_TEXT_RE.test(text);
+    });
+
+    for (const labelEl of candidateLabels) {
+      const btn = labelEl.closest(
+        "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
+      );
+      if (btn && isVisible(btn) && !btn.disabled && btn.getAttribute("aria-disabled") !== "true") {
+        return btn;
+      }
+    }
+
+    const button = Array.from(
+      scope.querySelectorAll(
+        "button, [role='button'], [data-react-aria-pressable='true'], input[type='button'], input[type='submit']",
+      ),
+    ).find((el) => {
+      if (!(el instanceof HTMLElement)) return false;
+      if (!isVisible(el)) return false;
+      if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+      const text = normalizeRewardText(el.innerText || el.textContent || "");
+      if (/^(close|dismiss|how it works|đóng|bỏ qua)$/i.test(text)) return false;
+      const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
+      if (/close|dismiss/i.test(ariaLabel)) return false;
+      if (READY_TO_CLAIM_LABEL_RE.test(text)) return false;
+      return CLAIM_MATCH_RE.test(text);
+    });
+    if (button) return button;
+  }
+
+  return null;
+}
+
+export { isCardCompleted };

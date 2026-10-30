@@ -119,6 +119,7 @@
         <div style="display:flex; gap:8px;">
           <button id="openSidebar" type="button">Open sidebar</button>
           <button id="runNow">Run now</button>
+          <button id="reloadExt" type="button" title="Reload extension from disk">Reload</button>
         </div>
       </div>
 
@@ -135,6 +136,22 @@
       <div class="row">
         <a href="#" id="openOptions">Open options</a>
       </div>
+    </div>
+
+    <div id="dailySetCard" class="card" style="margin-top: 12px; display: none;">
+      <div class="row" style="margin-top: 0; margin-bottom: 6px;">
+        <strong id="dailySetTitle">Daily Set</strong>
+        <span id="dailySetStreak" style="font-size: 13px; font-weight: 600; color: #ff922b;"></span>
+      </div>
+      <div id="dailySetList" class="stack" style="gap: 6px;"></div>
+    </div>
+
+    <div id="yourActivityCard" class="card" style="margin-top: 12px; display: none;">
+      <div class="row" style="margin-top: 0; margin-bottom: 6px;">
+        <strong id="yourActivityTitle">Your activity</strong>
+        <span id="yourActivityStreak" style="font-size: 13px; font-weight: 600; color: #ff922b;"></span>
+      </div>
+      <div id="yourActivityList" class="stack" style="gap: 6px;"></div>
     </div>
 
     <div class="card" style="margin-top: 12px;">

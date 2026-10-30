@@ -14,7 +14,7 @@ const els = {
 const DEFAULTS = {
   enabled: true,
   time: "01:00",
-  searchesPerRun: 50,        
+  searchesPerRun: 4,        
   intervalMin: 10,           
   intervalMax: 120,          
   customQueriesRaw: "",      
@@ -70,7 +70,7 @@ els.save.addEventListener("click", async (e) => {
   const enabled = els.enabled.checked;
   const time = els.time.value;
   const profileSlot = normalizeProfileSlot(els.profileSlot.value);
-  const searchesPerRun = Math.max(1, Math.min(100, parseInt(els.count.value || "50", 10)));
+  const searchesPerRun = Math.max(1, Math.min(100, parseInt(els.count.value || "4", 10)));
   const intervalMin = Math.max(0, parseInt(els.intervalMin.value || "10", 10));
   const intervalMax = Math.max(intervalMin + 1, parseInt(els.intervalMax.value || "120", 10));
   const customQueriesRaw = els.custom.value || "";
